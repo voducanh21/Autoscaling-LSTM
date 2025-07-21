@@ -1,0 +1,5 @@
+com\shop\chat\model\ChatMessage.class
+com\shop\chat\service\ChatService.class
+com\shop\chat\App.class
+com\shop\chat\controller\ChatController.class
+com\shop\chat\repository\ChatMessageRepository.class
