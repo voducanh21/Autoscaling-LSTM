@@ -23,19 +23,11 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   isConnected = false;
   private subscriptions: Subscription[] = [];
 
-  // Thêm property quickSuggestions
-  quickSuggestions = [
-    'Tôi muốn tìm điện thoại',
-    'Sản phẩm nào đang khuyến mãi?',
-    'Cách thức thanh toán',
-    'Chính sách đổi trả',
-    'Thời gian giao hàng'
-  ];
+  
 
   constructor(private chatService: ChatService) {}
 
   ngOnInit() {
-    this.initializeChat();
     this.loadChatHistory();
   }
 
@@ -47,19 +39,12 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.scrollToBottom();
   }
 
-  // Thêm method trackByMessageId
+  // Add trackByMessageId method
   trackByMessageId(index: number, message: ChatMessage): string {
     return message.id || index.toString();
   }
 
-  private initializeChat() {
-    this.messages.push({
-      from: 'bot',
-      text: 'Xin chào! Tôi là trợ lý tự động của AnD Shop. Tôi có thể giúp bạn tư vấn sản phẩm và trả lời các câu hỏi. Bạn cần hỗ trợ gì?',
-      timestamp: new Date(),
-      id: this.generateId()
-    });
-  }
+  
 
   private loadChatHistory() {
     const historySubscription = this.chatService.getMessages().subscribe({
@@ -103,7 +88,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     
     const loadingMsg: ChatMessage = {
       from: 'bot',
-      text: '⏳ Đang suy nghĩ...',
+      text: '⏳ Thinking...',
       timestamp: new Date(),
       id: 'loading'
     };
@@ -115,9 +100,9 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         
         let replyText = '';
         if (response.error) {
-          replyText = response.message || 'Xin lỗi, có lỗi xảy ra. Vui lòng thử lại.';
+          replyText = response.message || 'Sorry, an error occurred. Please try again.';
         } else {
-          replyText = response.reply || response.message || 'Tôi không hiểu câu hỏi của bạn. Bạn có thể diễn đạt lại được không?';
+          replyText = response.reply || response.message || 'I do not understand your question. Could you please rephrase it?';
         }
         
         const botMsg: ChatMessage = {
@@ -136,7 +121,7 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
         
         const errorMsg: ChatMessage = {
           from: 'bot',
-          text: 'Xin lỗi, tôi đang gặp sự cố kết nối. Vui lòng thử lại sau.',
+          text: 'Sorry, I am having connection issues. Please try again later.',
           timestamp: new Date(),
           id: this.generateId()
         };
@@ -155,7 +140,6 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
     const clearSubscription = this.chatService.clearMessages().subscribe({
       next: () => {
         this.messages = [];
-        this.initializeChat();
       },
       error: (error) => {
         console.error('Error clearing chat:', error);
@@ -184,9 +168,9 @@ export class ChatComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   getConnectionStatus(): string {
-    if (this.isLoading) return 'Đang gửi...';
-    if (this.isConnected) return 'Đã kết nối';
-    return 'Mất kết nối';
+    if (this.isLoading) return 'Sending...';
+    if (this.isConnected) return 'Connected';
+    return 'Disconnected';
   }
 
   getConnectionStatusClass(): string {

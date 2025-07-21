@@ -1,5 +1,7 @@
 import { Component, Input, OnInit } from '@angular/core';
+import { Router } from '@angular/router';
 import { Cart, CartItem } from 'src/app/models/cart.model';
+import { AuthService } from 'src/app/authentication/authentication.service';
 import { CartService } from 'src/app/services/cart.service';
 
 @Component({
@@ -10,6 +12,7 @@ export class HeaderComponent implements OnInit{
 
   private _cart: Cart = { items: [] }
   itemsQuantity = 0;
+  isLoggedIn = false;
 
   @Input() 
   
@@ -28,10 +31,12 @@ export class HeaderComponent implements OnInit{
   
   
 
-  constructor(private _cartService: CartService){
+  constructor(private _cartService: CartService,
+    private authService: AuthService,
+    private router: Router){
   }
   ngOnInit(): void {
-  
+    this.isLoggedIn = this.authService.isUserLoggedIn();
   }
 
   getTotal( items: Array<CartItem> ):number{
@@ -42,5 +47,10 @@ export class HeaderComponent implements OnInit{
     this._cartService.clearCart();
   }
 
+  logout(){
+    this.authService.logout();
+    this.isLoggedIn = false;
+    this.router.navigate(['home']);
+  }
  
 }

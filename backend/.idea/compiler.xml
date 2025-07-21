@@ -12,10 +12,10 @@
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
-      <module name="np.com.esewa.learn.paymentservice.main" target="17" />
-      <module name="np.com.esewa.learn.paymentservice.test" target="17" />
-      <module name="np.com.esewa.learn.productservice.main" target="17" />
-      <module name="np.com.esewa.learn.productservice.test" target="17" />
+      <module name="com.shop.paymentservice.main" target="17" />
+      <module name="com.shop.paymentservice.test" target="17" />
+      <module name="com.shop.productservice.main" target="17" />
+      <module name="com.shop.productservice.test" target="17" />
       <module name="registery-discovery-server" target="17" />
       <module name="registry-discover-server" target="17" />
     </bytecodeTargetLevel>

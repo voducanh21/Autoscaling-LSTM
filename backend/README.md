@@ -11,9 +11,10 @@ CREATE DATABASE productdb;
 ## 2.1. Run registry-discovery-server
 cd .\registry-discovery-server
 .\gradlew.bat build 
+.\gradlew bootRun
 ## if you want to skip test
 .\gradlew.bat build - test
-.\gradlew bootRun
+
 ## 2.2. Run api-gateway
 cd .\api-gateway
 .\gradlew.bat build

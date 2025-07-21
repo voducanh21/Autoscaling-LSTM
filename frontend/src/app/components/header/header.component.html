@@ -13,6 +13,16 @@
         Chat
         </a>
 
+        <button *ngIf="isLoggedIn" (click)="logout()"
+        class="flex items-center border border-blue-500 rounded px-3 py-1 hover:bg-blue-50 transition-colors duration-150">
+        Logout
+        </button>
+
+        <a *ngIf="!isLoggedIn" routerLink="auth/login"
+        class="flex items-center border border-blue-500 rounded px-3 py-1 hover:bg-blue-50 transition-colors duration-150">
+        Login
+        </a>
+
         <button 
             mat-icon-button
             [matMenuTriggerFor]="menu">

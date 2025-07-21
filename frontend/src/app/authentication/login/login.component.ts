@@ -16,7 +16,7 @@ export class LoginComponent implements OnInit {
   registrationSuccess: boolean = false;
 
   user= {
-    userName: '',
+    email: '',
     password: '',
   }
 
@@ -59,8 +59,8 @@ export class LoginComponent implements OnInit {
 
   updateFormSubmission(){
     if(
-      (this.user.userName != '' && this.user.password != '')
-      && ( this.user.userName != null && this.user.password != null)
+      (this.user.email != '' && this.user.password != '')
+      && ( this.user.email != null && this.user.password != null)
       ){
       this.disableSubmission = false
     }
@@ -69,14 +69,15 @@ export class LoginComponent implements OnInit {
   onSubmit(){
     console.log("form submitted.")
     if(
-      (this.user.userName != '' && this.user.password != '')
-      && ( this.user.userName != null && this.user.password != null)
+      (this.user.email != '' && this.user.password != '')
+      && ( this.user.email != null && this.user.password != null)
       ){
       this.authService.doLogin(this.user)
         .subscribe({
           next: (response:any) => {
             var token = response.token;
-            this.authService.loginUser(token);
+            var userId = response.userId; 
+            this.authService.loginUser(token, userId);
             // redirect user to continue
             this.router.navigateByUrl('/cart');
           },

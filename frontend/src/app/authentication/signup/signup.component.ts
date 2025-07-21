@@ -16,6 +16,7 @@ export class SignupComponent implements OnInit, OnDestroy{
 
   user= {
     userName: '',
+    email: '',
     password: '',
   }
   confirm_password =''
@@ -33,8 +34,8 @@ export class SignupComponent implements OnInit, OnDestroy{
   onSubmit(){
     console.log("form submitted.")
     if(
-      (this.user.userName != '' && this.user.password != '')
-      && ( this.user.userName != null && this.user.password != null)
+      (this.user.userName != '' && this.user.password != '' && this.user.email != '')
+      && ( this.user.userName != null && this.user.password != null && this.user.email != null)
       && (this.user.password === this.confirm_password)
       ){
       this._subscribption =  this.authService.signup(this.user)

@@ -14,30 +14,39 @@ export class ChatService {
   sendMessage(message: string): Observable<any> {
     console.log('=== ChatService.sendMessage ===');
     console.log('Message:', message);
+
+    const userId = localStorage.getItem('userId');
+    if (!userId) {
+      console.error('UserId not found in localStorage. Please login.');
+      return of({
+        success: false,
+        reply: 'You must be logged in to use the chat.'
+      });
+    }
     
     const headers = new HttpHeaders({
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     });
     
-    // Backend ChatController có thể nhận input dạng { message: string }
-    const payload = { message };
+    // Backend ChatController can accept input in the form { message: string }
+    const payload = { userId, message };
     
     return this.http.post<any>(this.apiUrl, payload, { headers })
     .pipe(
-      // Thử lại request 1 lần nếu lỗi
+      // Retry the request once on error
       retry(1),
       
-      // Giảm timeout xuống 30s thay vì 60s
+      // Reduce timeout to 30s instead of 60s
       timeout(30000),
       
-      // Log chi tiết response để debug
+      // Log the detailed response for debugging
       tap(response => {
         console.log('=== Response received ===');
         console.log('Response type:', typeof response);
         console.log('Response:', response);
         
-        // Kiểm tra thêm các trường từ backend
+        // Check for additional fields from the backend
         if (response) {
           console.log('Has success:', response.success !== undefined);
           console.log('Has reply:', response.reply !== undefined);
@@ -46,66 +55,19 @@ export class ChatService {
         }
       }),
       
-      map(response => {
-        // Xử lý response null/undefined
-        if (!response) {
-          console.warn('Response is null or undefined');
-          return { 
-            success: false,
-            reply: 'Không nhận được dữ liệu từ server' 
-          };
-        }
-        
-        // Xử lý string response (hiếm gặp)
-        if (typeof response === 'string') {
-          try {
-            return JSON.parse(response);
-          } catch (e) {
-            return { success: true, reply: response };
-          }
-        }
-        
-        // Xử lý object response từ backend
-        // Backend luôn trả về nhiều trường: reply, message, assistantResponse
-        let reply = null;
-        
-        // Ưu tiên trường 'reply' từ backend
-        if (response.reply) {
-          reply = response.reply;
-        } 
-        // Backup: dùng 'assistantResponse' từ backend
-        else if (response.assistantResponse) {
-          reply = response.assistantResponse;
-        } 
-        // Backup: dùng 'message' từ backend
-        else if (response.message) {
-          reply = response.message;
-        }
-        // Fallback nếu không có field nào
-        else {
-          console.warn('Response is missing expected fields:', response);
-          reply = 'Server trả về dữ liệu không đúng định dạng';
-        }
-        
-        return {
-          success: response.success !== false, // Mặc định true nếu không được chỉ định
-          reply: reply
-        };
-      }),
-      
       catchError((error: HttpErrorResponse | TimeoutError) => {
         console.error('=== Chat Error ===');
         console.error('Error type:', error.constructor.name);
         
-        // TimeoutError xử lý riêng (từ RxJS)
+        // Handle TimeoutError separately (from RxJS)
         if (error instanceof TimeoutError) {
           return of({
             success: false,
-            reply: 'Server phản hồi quá chậm. Vui lòng thử lại sau.'
+            reply: 'Server took too long to respond. Please try again later.'
           });
         }
         
-        // HttpErrorResponse xử lý riêng
+        // Handle HttpErrorResponse separately
         if (error instanceof HttpErrorResponse) {
           console.error('Status:', error.status);
           console.error('StatusText:', error.statusText);
@@ -113,11 +75,11 @@ export class ChatService {
           console.error('URL:', error.url);
           console.error('Error:', error.error);
           
-          // CORS hoặc network issue (status = 0)
+          // CORS or network issue (status = 0)
           if (error.status === 0) {
             return of({
               success: false,
-              reply: 'Không thể kết nối đến server. Vui lòng kiểm tra mạng và thử lại.'
+              reply: 'Cannot connect to the server. Please check your network and try again.'
             });
           }
           
@@ -125,7 +87,7 @@ export class ChatService {
           if (error.status >= 500) {
             return of({
               success: false,
-              reply: `Lỗi server: ${error.status}. Vui lòng thử lại sau.`
+              reply: `Server error: ${error.status}. Please try again later.`
             });
           }
           
@@ -133,22 +95,26 @@ export class ChatService {
           if (error.status >= 400 && error.status < 500) {
             return of({
               success: false,
-              reply: `Lỗi yêu cầu: ${error.status}. Vui lòng thử lại.`
+              reply: `Request error: ${error.status}. Please try again.`
             });
           }
         }
         
-        // Fallback cho các lỗi khác
+        // Fallback for other errors
         return of({
           success: false,
-          reply: 'Có lỗi xảy ra. Vui lòng thử lại sau.'
+          reply: 'An unexpected error occurred. Please try again later.'
         });
       })
     );
   }
 
   getMessages(): Observable<any[]> {
-    return this.http.get<any[]>(this.apiUrl).pipe(
+    const userId = localStorage.getItem('userId');
+    if (!userId) {
+      return of([]);
+    }
+    return this.http.get<any[]>(`${this.apiUrl}/${userId}`).pipe(
       retry(1),
       timeout(10000),
       catchError(error => {
@@ -159,7 +125,11 @@ export class ChatService {
   }
 
   clearMessages(): Observable<any> {
-    return this.http.delete<any>(this.apiUrl).pipe(
+    const userId = localStorage.getItem('userId');
+    if (!userId) {
+      return of({ success: false });
+    }
+    return this.http.delete<any>(`${this.apiUrl}/${userId}`).pipe(
       retry(1),
       timeout(10000),
       catchError(error => {

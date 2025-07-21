@@ -18,7 +18,7 @@ spring:
               - PUT
               - PATCH
             allowedHeaders: "*"
-            allowCredentials: false
+            allowCredentials: true
             maxAge: 3600
 
       routes:

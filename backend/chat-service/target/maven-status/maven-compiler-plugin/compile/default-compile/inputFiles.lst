@@ -1,5 +1,7 @@
-D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chat\App.java
-D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chat\controller\ChatController.java
-D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chat\model\ChatMessage.java
-D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chat\repository\ChatMessageRepository.java
-D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chat\service\ChatService.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\controller\ChatController.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\model\ChatMessage.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\config\ChatConfig.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\repository\ChatMessageRepository.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\controller\ChatRequest.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\App.java
+D:\Ecommerce_Web\ecommerce-fullstack\backend\chat-service\src\main\java\com\shop\chatservice\service\ChatService.java

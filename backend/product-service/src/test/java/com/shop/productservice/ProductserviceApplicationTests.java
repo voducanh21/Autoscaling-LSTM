@@ -1,0 +1,26 @@
+package com.shop.productservice;
+
+import com.shop.productservice.repositories.CategoryRepository;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+@SpringBootTest
+class ProductserviceApplicationTests {
+
+    @Autowired
+    private CategoryRepository categoryRepository;
+
+    @Test
+    void category_Repository_Gives_Category_By_Name(){
+        var categoryReturned = categoryRepository.findCategoryByName("Flagship phone");
+        assertEquals("men's clothing", categoryReturned.getName() );
+    }
+
+    @Test
+    void contextLoads() {
+    }
+
+}

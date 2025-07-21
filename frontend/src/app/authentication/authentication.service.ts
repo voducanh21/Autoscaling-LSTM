@@ -19,8 +19,9 @@ export class AuthService {
   }
 
   //   login user 
-  loginUser(token: string){
+  loginUser(token: string, userId: string){
     localStorage.setItem("ecommerce_token",token);
+    localStorage.setItem("userId", userId);
     return true;
   }
 
@@ -40,6 +41,7 @@ export class AuthService {
   //  remove token from local storage to logout user
   logout(){
     localStorage.removeItem('ecommerce_token');
+    localStorage.removeItem('userId');
     return true;
   }
 
