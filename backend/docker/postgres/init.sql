@@ -1,0 +1,4 @@
+CREATE DATABASE productdb;
+
+CREATE USER appuser WITH ENCRYPTED PASSWORD 'password';
+GRANT ALL PRIVILEGES ON DATABASE productdb TO appuser;

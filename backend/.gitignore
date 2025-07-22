@@ -1,0 +1,6 @@
+# Ignore Docker volumes or runtime data
+data/
+**/data/
+docker/mysql/data/
+docker/mongodb/data/
+docker/postgres/data/

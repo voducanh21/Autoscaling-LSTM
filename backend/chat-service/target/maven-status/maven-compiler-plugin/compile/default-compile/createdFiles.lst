@@ -1,6 +1,0 @@
-com\shop\chatservice\controller\ChatController.class
-com\shop\chatservice\repository\ChatMessageRepository.class
-com\shop\chatservice\model\ChatMessage.class
-com\shop\chatservice\App.class
-com\shop\chatservice\controller\ChatRequest.class
-com\shop\chatservice\service\ChatService.class

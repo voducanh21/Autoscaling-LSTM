@@ -11,15 +11,6 @@ spring:
 server:
   port: 8085
 
-eureka:
-  instance:
-    prefer-ip-address: true
-  client:
-    fetch-registry: true
-    register-with-eureka: true
-    service-url:
-      defaultZone: ${EUREKA_SERVER_ADDRESS:http://localhost:8761/eureka}
-
 # Gemini API Configuration
 gemini:
   api-key: AIzaSyBX49M-_XiZpNlEcLVaa__W5rtyJSe6ZIA
