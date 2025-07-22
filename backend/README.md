@@ -17,28 +17,28 @@ cd .\registry-discovery-server
 
 ## 2.2. Run api-gateway
 cd .\api-gateway
-.\gradlew.bat build
-.\gradlew bootRun
+.\mvnw clean install
+.\mvnw spring-boot:run
 
 ## 2.3. Run authentication-service
 cd .\authentication-service
-mvnd clean install
-mvnd spring-boot:run
+.\mvnw clean install
+.\mvnw spring-boot:run
 
 ## 2.4. Run product-service
 cd .\product-service
-.\gradlew.bat build
-.\gradlew bootRun
+.\mvnw clean install
+.\mvnw spring-boot:run
 
 ## 2.5. Run order-service
 cd .\order-service
-mvnd clean install
-mvnd spring-boot:run
+.\mvnw clean install
+.\mvnw spring-boot:run
 
 ## 2.6. Run payment-service
 cd .\payment-service
-.\gradlew.bat build
-.\gradlew bootRun
+.\mvnw clean install
+.\mvnw spring-boot:run
 
 ## 2.7. Run chat-service
 cd .\chat-service
