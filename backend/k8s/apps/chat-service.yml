@@ -1,0 +1,56 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-service
+  namespace: apps
+  labels:
+    app: chat-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chat-service
+  template:
+    metadata:
+      labels:
+        app: chat-service
+    spec:
+      containers:
+        - name: chat-service
+          image: ducanhvo/chat-service:latest  # đổi đúng image nếu cần
+          ports:
+            - containerPort: 8085
+          env:
+            - name: SPRING_DATA_MONGODB_URI
+              value: mongodb://mongo:27017/chatdb  # mongo là tên service nội bộ
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-secret
+                  key: api-key
+            - name: GEMINI_MODEL
+              value: gemini-2.5-flash
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-service
+  namespace: apps
+spec:
+  selector:
+    app: chat-service
+  ports:
+    - protocol: TCP
+      port: 8085
+      targetPort: 8085
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gemini-secret
+  namespace: apps
+type: Opaque
+stringData:
+  api-key: "AIzaSyBX49M-_XiZpNlEcLVaa__W5rtyJSe6ZIA"
