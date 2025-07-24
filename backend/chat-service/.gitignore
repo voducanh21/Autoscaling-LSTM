@@ -1,33 +1,84 @@
+# ===================================
+# General
 HELP.md
-target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
+*.log
+*.tmp
 
-### STS ###
+# Ignore OS Files
+.DS_Store
+Thumbs.db
+
+# ===================================
+# Build
+target/
+build/
+.gradle/
+out/
+bin/
+
+# Allow specific build folders in src (optional)
+!**/src/main/**/build/
+!**/src/test/**/build/
+!**/src/main/**/out/
+!**/src/test/**/out/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+# ===================================
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ===================================
+# Maven
+.mvn/
+.settings/
+dependency-reduced-pom.xml
+release.properties
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+*.class
+
+# ===================================
+# STS (Spring Tool Suite)
 .apt_generated
 .classpath
 .factorypath
 .project
-.settings
+.settings/
 .springBeans
-.sts4-cache
+.sts4-cache/
 
-### IntelliJ IDEA ###
-.idea
-*.iws
+# ===================================
+# IntelliJ IDEA
+.idea/
 *.iml
+*.iws
 *.ipr
 
-### NetBeans ###
+# ===================================
+# NetBeans
 /nbproject/private/
 /nbbuild/
 /dist/
 /nbdist/
 /.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
-### VS Code ###
+# ===================================
+# VS Code
 .vscode/
+
+# ===================================
+# Logs and temp
+*.log
+*.log.*
+*.tmp
+*.swp
+*.swo
+
+# ===================================
+# Local Env Files
+.env
+.env.*
