@@ -1,0 +1,17 @@
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\resources\ErrorResponse.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\services\category\CategoryService.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\resources\ProductResponse.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\entities\Category.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\entities\Product.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\services\product\ProductServiceImpl.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\repositories\CategoryRepository.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\repositories\ProductRepository.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\ProductServiceApplication.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\exceptions\ProductNotFoundException.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\resources\ProductRequest.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\services\category\CategoryServiceImpl.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\controllers\CategoryController.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\services\product\ProductService.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\utils\JwtFilter.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\exceptions\ProductResponseEntityExceptionHandler.java
+C:\TAILIEUHOCTAP\KLTN\E-commerce_Web\backend\product-service\src\main\java\com\shop\productservice\controllers\ProductController.java

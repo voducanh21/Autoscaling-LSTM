@@ -24,7 +24,7 @@ metadata:
   name: mysql-pvc
   namespace: infra
 spec:
-  storageClassName: gp2  # hoặc bỏ dòng này nếu dùng local hoặc không dùng AWS
+  storageClassName: standard  # hoặc bỏ dòng này nếu dùng local hoặc không dùng AWS
   accessModes:
     - ReadWriteOnce
   resources:

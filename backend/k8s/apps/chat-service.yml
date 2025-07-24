@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: chat-service
-          image: ducanhvo/chat-service:latest  # đổi đúng image nếu cần
+          image: ducanhvo/new-chat-service:latest  # đổi đúng image nếu cần
           ports:
             - containerPort: 8085
           env:
@@ -53,4 +53,4 @@ metadata:
   namespace: apps
 type: Opaque
 stringData:
-  api-key: "AIzaSyBX49M-_XiZpNlEcLVaa__W5rtyJSe6ZIA"
+  api-key: "AIzaSyB-Z61gUMYknHhGf1y0HXOaCXDza3ya1tY"

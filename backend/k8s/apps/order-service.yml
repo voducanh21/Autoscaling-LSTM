@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: order-service
-          image: ducanhvo/order-service:latest  # đổi đúng tên image
+          image: ducanhvo/new-order-service:latest  # đổi đúng tên image
           ports:
             - containerPort: 8083
           env:

@@ -15,7 +15,7 @@ metadata:
   namespace: infra
 data:
   initdb.sql: |
-    CREATE DATABASE IF NOT EXISTS productdb;
+    CREATE DATABASE productdb;
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -23,7 +23,7 @@ metadata:
   name: postgres-pvc
   namespace: infra
 spec:
-  storageClassName: gp2  # nếu dùng local thì bỏ dòng này hoặc dùng "standard"
+  storageClassName: standard  # nếu dùng local thì bỏ dòng này hoặc dùng "standard"
   accessModes:
     - ReadWriteOnce
   resources:

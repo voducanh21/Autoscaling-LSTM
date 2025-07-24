@@ -6,7 +6,7 @@ import { Injectable } from '@angular/core';
 })
 export class AuthService {
 
-   BASE_URL = 'http://localhost:8888'
+   BASE_URL = 'http://api-gateway:8888'
 
   constructor(private httpClient: HttpClient) { 
 

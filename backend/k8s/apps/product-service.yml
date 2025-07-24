@@ -18,12 +18,12 @@ spec:
     spec:
       containers:
         - name: product-service
-          image: ducanhvo/product-service:latest  # thay đổi nếu dùng tag khác
+          image: ducanhvo/new-product-service:latest  # thay đổi nếu dùng tag khác
           ports:
             - containerPort: 8081
           env:
             - name: SPRING_DATASOURCE_URL
-              value: jdbc:postgresql://postgres:5432/productdb
+              value: jdbc:postgresql://postgres.infra.svc.cluster.local:5432/productdb
             - name: SPRING_DATASOURCE_USERNAME
               value: postgres
             - name: SPRING_DATASOURCE_PASSWORD

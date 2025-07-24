@@ -35,7 +35,7 @@ metadata:
   name: mongo-pvc
   namespace: infra
 spec:
-  storageClassName: gp2   # nếu dùng local thì bỏ dòng này hoặc đổi thành 'standard'
+  storageClassName: standard   # nếu dùng local thì bỏ dòng này hoặc đổi thành 'standard'
   accessModes:
     - ReadWriteOnce
   resources:
