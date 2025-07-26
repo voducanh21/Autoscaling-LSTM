@@ -23,11 +23,11 @@ metadata:
   namespace: infra
 data:
   init.js: |
-    db = connect("localhost:27017/chatdb");
-    db.createCollection("dummy_chat");
+    db = db.getSiblingDB('chatdb');
+    db.createCollection('messages');
 
-    db = connect("localhost:27017/orderdb");
-    db.createCollection("dummy_order");
+    db = db.getSiblingDB('orderdb');
+    db.createCollection('orders');
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

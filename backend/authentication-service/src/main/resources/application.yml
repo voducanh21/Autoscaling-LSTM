@@ -2,19 +2,19 @@ server:
   port: 8084
 
 jwt:
-  secret: esewa
+  secret: ${JWT_SECRET:esewa}
 app:
   jwttoken:
-    message: esewa-is-my-secret-key
+    message: ${APP_JWTTOKEN_MESSAGE:esewa-is-my-secret-key}
 
 spring:
   application:
     name: AUTHENTICATION-SERVICE
 
   datasource:
-    url: jdbc:mysql://localhost:3306/userdb
-    username: root
-    password: root
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/userdb}
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
 
   jpa:
     hibernate:

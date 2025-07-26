@@ -3,7 +3,7 @@ spring:
     mongodb:
       database: orderdb
       port: 27017
-      uri: mongodb://localhost:27017
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://root:password@localhost:27017/orderdb?authSource=admin}
 
 
 

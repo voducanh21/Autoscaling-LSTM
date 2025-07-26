@@ -3,7 +3,7 @@ spring:
     mongodb:
       database: chatdb
       port: 27017
-      uri: mongodb://localhost:27017
+      uri: ${SPRING_DATA_MONGODB_URI:mongodb://root:password@localhost:27017/chatdb?authSource=admin}
 
   application:
     name: CHAT-SERVICE
@@ -13,5 +13,5 @@ server:
 
 # Gemini API Configuration
 gemini:
-  api-key: AIzaSyBX49M-_XiZpNlEcLVaa__W5rtyJSe6ZIA
-  model: gemini-2.5-flash
+  api-key: ${GEMINI_API_KEY:AIzaSyBX49M-_XiZpNlEcLVaa__W5rtyJSe6ZIA}
+  model: ${GEMINI_MODEL:gemini-2.5-flash}

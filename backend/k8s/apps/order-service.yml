@@ -23,7 +23,7 @@ spec:
             - containerPort: 8083
           env:
             - name: SPRING_DATA_MONGODB_URI
-              value: mongodb://mongo:27017/orderdb
+              value: mongodb://root:password@mongo.infra.svc.cluster.local:27017/orderdb?authSource=admin
 ---
 apiVersion: v1
 kind: Service

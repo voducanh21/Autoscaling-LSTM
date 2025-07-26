@@ -23,27 +23,27 @@ spring:
 
       routes:
         - id: PRODUCT-SERVICE
-          uri: http://product-service:8081
+          uri: ${PRODUCT_SERVICE_URL:http://product-service.apps.svc.cluster.local:8081}
           predicates:
             - Path=/api/products/**
 
         - id: PAYMENT-SERVICE
-          uri: http://payment-service:8082
+          uri: ${PAYMENT_SERVICE_URL:http://payment-service.apps.svc.cluster.local:8082}
           predicates:
             - Path=/api/payment/**
 
         - id: ORDER-SERVICE
-          uri: http://order-service:8083
+          uri: ${ORDER_SERVICE_URL:http://order-service.apps.svc.cluster.local:8083}
           predicates:
             - Path=/api/order/**
 
         - id: AUTHENTICATION-SERVICE
-          uri: http://authentication-service:8084
+          uri: ${AUTHENTICATION_SERVICE_URL:http://authentication-service.apps.svc.cluster.local:8084}
           predicates:
             - Path=/api/auth/**
 
         - id: CHAT-SERVICE
-          uri: http://chat-service:8085
+          uri: ${CHAT_SERVICE_URL:http://chat-service.apps.svc.cluster.local:8085}
           predicates:
             - Path=/api/chat/**
 
