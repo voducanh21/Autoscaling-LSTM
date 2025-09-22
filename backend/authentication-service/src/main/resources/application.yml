@@ -29,5 +29,22 @@ spring:
 #            clientId: 156aaa94354206aa50da
 #            clientSecret: abb261ac11ba291f98d84b59f953623bf428095c
 
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
 
-
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    # bật histogram cho http.server.requests
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true

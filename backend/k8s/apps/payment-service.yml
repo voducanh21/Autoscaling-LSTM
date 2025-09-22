@@ -16,11 +16,25 @@ spec:
       labels:
         app: payment-service
     spec:
+      # --- ADDED: ép pod payment-service chạy trên worker role=app
+      nodeSelector:
+        role: app
       containers:
         - name: payment-service
           image: ducanhvo/new-payment-service:latest  # thay đổi nếu dùng tag khác
           ports:
-            - containerPort: 8082
+            - name: http                 # ← giữ port HTTP
+              containerPort: 8082
+            - name: metrics              # ← thêm port “metrics” để Prometheus scrape
+              containerPort: 8082
+          # --- ADDED: baseline requests/limits để scheduler ổn định hơn
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: SPRING_DATASOURCE_URL
               value: jdbc:mysql://mysql.infra.svc.cluster.local:3306/paymentdb
@@ -34,11 +48,18 @@ kind: Service
 metadata:
   name: payment-service
   namespace: apps
+  labels:
+    app: payment-service
 spec:
   selector:
     app: payment-service
   ports:
-    - protocol: TCP
+    - name: http                     # ← port cho traffic ứng dụng
+      protocol: TCP
       port: 8082
-      targetPort: 8082
+      targetPort: http
+    - name: metrics                  # ← thêm port ClusterIP “metrics” cho Prometheus
+      protocol: TCP
+      port: 9090                     # ← port mới mà Prometheus sẽ gọi
+      targetPort: metrics            # ← map về containerPort=8082 (port “metrics”)
   type: ClusterIP

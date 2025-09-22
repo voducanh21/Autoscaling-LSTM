@@ -5,18 +5,16 @@ spring:
     name: API-GATEWAY
   cloud:
     gateway:
+      # ✅ Bật metrics cho Spring Cloud Gateway
+      metrics:
+        enabled: true
+
       globalcors:
         corsConfigurations:
           '[/**]':
             allowedOrigins:
               - "http://localhost:4200"
-            allowedMethods:
-              - GET
-              - POST
-              - DELETE
-              - OPTIONS
-              - PUT
-              - PATCH
+            allowedMethods: [GET, POST, DELETE, OPTIONS, PUT, PATCH]
             allowedHeaders: "*"
             allowCredentials: true
             maxAge: 3600
@@ -24,28 +22,44 @@ spring:
       routes:
         - id: PRODUCT-SERVICE
           uri: ${PRODUCT_SERVICE_URL:http://product-service.apps.svc.cluster.local:8081}
-          predicates:
-            - Path=/api/products/**
+          predicates: [ Path=/api/products/** ]
 
         - id: PAYMENT-SERVICE
           uri: ${PAYMENT_SERVICE_URL:http://payment-service.apps.svc.cluster.local:8082}
-          predicates:
-            - Path=/api/payment/**
+          predicates: [ Path=/api/payment/** ]
 
         - id: ORDER-SERVICE
           uri: ${ORDER_SERVICE_URL:http://order-service.apps.svc.cluster.local:8083}
-          predicates:
-            - Path=/api/order/**
+          predicates: [ Path=/api/order/** ]
 
         - id: AUTHENTICATION-SERVICE
           uri: ${AUTHENTICATION_SERVICE_URL:http://authentication-service.apps.svc.cluster.local:8084}
-          predicates:
-            - Path=/api/auth/**
+          predicates: [ Path=/api/auth/** ]
 
         - id: CHAT-SERVICE
           uri: ${CHAT_SERVICE_URL:http://chat-service.apps.svc.cluster.local:8085}
-          predicates:
-            - Path=/api/chat/**
+          predicates: [ Path=/api/chat/** ]
 
 server:
   port: 8888
+
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
+
+  #Gắn tag app (lọc/thống kê)
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    # bật histogram cho http.server.requests
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true

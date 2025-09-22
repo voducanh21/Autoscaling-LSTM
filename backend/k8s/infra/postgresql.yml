@@ -7,6 +7,7 @@ metadata:
 type: Opaque
 data:
   postgres_password: cm9vdA==     # base64 của "root"
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -16,6 +17,7 @@ metadata:
 data:
   initdb.sql: |
     CREATE DATABASE productdb;
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -23,12 +25,14 @@ metadata:
   name: postgres-pvc
   namespace: infra
 spec:
-  storageClassName: standard  # nếu dùng local thì bỏ dòng này hoặc dùng "standard"
+  # --- CHANGED: dùng StorageClass "standard-wffc" để PV gắn đúng node role=app
+  storageClassName: standard-wffc
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 1Gi   # --- CHANGED: 1Gi -> 5Gi (tuỳ bạn, có thể giữ 1Gi nếu muốn)
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,11 +51,22 @@ spec:
       labels:
         app: postgres
     spec:
+      # --- ADDED: ép PostgreSQL chạy trên worker dành cho apps/infra/monitoring
+      nodeSelector:
+        role: app
       containers:
         - name: postgres
           image: postgres:15
           ports:
             - containerPort: 5432
+          # --- ADDED: baseline resources để scheduler ổn định
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
           env:
             - name: POSTGRES_USER
               value: postgres
@@ -72,6 +87,7 @@ spec:
         - name: postgres-initdb-config
           configMap:
             name: postgres-initdb-config
+
 ---
 apiVersion: v1
 kind: Service

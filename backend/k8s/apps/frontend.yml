@@ -13,13 +13,22 @@ spec:
       labels:
         app: frontend
     spec:
-#      nodeSelector:
-#       kubernetes.io/hostname: ip-10-0-102-141.ap-southeast-1.compute.internal
+      # --- ADDED: ép pod frontend chạy trên worker role=app
+      nodeSelector:
+        role: app
       containers:
         - name: frontend
           image: ducanhvo/new-frontend:latest  # ← Cập nhật tag mới khi cần
           ports:
             - containerPort: 80
+          # --- ADDED: baseline requests/limits để scheduler ổn định hơn
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service

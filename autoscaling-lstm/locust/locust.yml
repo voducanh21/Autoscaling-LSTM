@@ -1,0 +1,179 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loadtest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: locustfile
+  namespace: loadtest
+data:
+  locustfile.py: |
+    import os
+    from locust import FastHttpUser, task, constant
+    from locust.shape import LoadTestShape
+
+    HOST = os.getenv("HOST", "http://api-gateway.apps.svc.cluster.local:8888")
+    TIMEOUT = float(os.getenv("TIMEOUT", "5"))
+
+    AUTH_LOGIN_PATH     = os.getenv("AUTH_LOGIN_PATH", "/api/auth/login")
+    PRODUCTS_LIST_PATH  = os.getenv("PRODUCTS_LIST_PATH", "/api/products")
+    ORDER_CREATE_PATH   = os.getenv("ORDER_CREATE_PATH", "/api/order/place-order")
+    PAYMENT_MODES_PATH  = os.getenv("PAYMENT_MODES_PATH", "/api/payment/modes")
+
+    USER_EMAIL    = os.getenv("USER_EMAIL", "test1@example.com")
+    USER_PASSWORD = os.getenv("USER_PASSWORD", "password123")
+    VALID_PRODUCT_ID = int(os.getenv("VALID_PRODUCT_ID", "1"))
+
+    W_AUTH   = int(os.getenv("W_AUTH", "1"))
+    W_PROD   = int(os.getenv("W_PROD", "6"))
+    W_ORDER  = int(os.getenv("W_ORDER", "2"))
+    W_PAYMOD = int(os.getenv("W_PAYMOD", "1"))
+
+    class MinimalUser(FastHttpUser):
+        host = HOST
+        wait_time = constant(0)
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.h = {}
+
+        @task(W_AUTH)
+        def auth_login(self):
+            try:
+                r = self.client.post(
+                    AUTH_LOGIN_PATH,
+                    json={"email": USER_EMAIL, "password": USER_PASSWORD},
+                    timeout=TIMEOUT, name=AUTH_LOGIN_PATH
+                )
+                if r.status_code // 100 == 2:
+                    j = r.json()
+                    tok = j.get("token") or j.get("access_token")
+                    if tok:
+                        self.h = {"Authorization": f"Bearer {tok}"}
+            except Exception:
+                pass
+
+        @task(W_PROD)
+        def products_list(self):
+            self.client.get(PRODUCTS_LIST_PATH, name=PRODUCTS_LIST_PATH, timeout=TIMEOUT)
+
+        @task(W_ORDER)
+        def order_create(self):
+            if not self.h:
+                return
+            self.client.post(
+                ORDER_CREATE_PATH,
+                json={"items": [{"productId": VALID_PRODUCT_ID, "quantity": 1}]},
+                headers=self.h, name=ORDER_CREATE_PATH, timeout=TIMEOUT
+            )
+
+        @task(W_PAYMOD)
+        def payment_modes(self):
+            self.client.get(PAYMENT_MODES_PATH, name=PAYMENT_MODES_PATH, timeout=TIMEOUT)
+
+    class FourStageUsers(LoadTestShape):
+        users = [int(x) for x in os.getenv("STAGE_USERS", "50,100,200,50").split(",")]
+        durs  = [int(x) for x in os.getenv("STAGE_DURS",  "300,600,600,300").split(",")]
+        factor = float(os.getenv("SPAWN_RATE_FACTOR", "0.2"))
+        def __init__(self):
+            super().__init__()
+            assert len(self.users) == len(self.durs)
+            self.ends = []
+            t = 0
+            for d in self.durs:
+                t += d; self.ends.append(t)
+        def tick(self):
+            rt = self.get_run_time()
+            for end, u in zip(self.ends, self.users):
+                if rt < end:
+                    spawn = max(1, int(u * self.factor))
+                    return (u, spawn)
+            return None
+    shape = FourStageUsers()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: locust-master
+  namespace: loadtest
+spec:
+  selector: { app: locust, role: master }
+  ports:
+    - { name: web,       port: 8089, targetPort: 8089 }
+    - { name: master-p1, port: 5557, targetPort: 5557 }
+    - { name: master-p2, port: 5558, targetPort: 5558 }
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-master
+  namespace: loadtest
+  labels: { app: locust, role: master }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: locust, role: master }
+  template:
+    metadata:
+      labels: { app: locust, role: master }
+    spec:
+      nodeSelector:
+        role: loadgen
+      containers:
+        - name: master
+          image: locustio/locust:2.31.3
+          args: ["-f", "/locust/locustfile.py",
+                 "--master",
+                 "--master-bind-host=0.0.0.0",
+                 "--master-port=5557"]
+          ports:
+            - { containerPort: 8089, name: web }
+            - { containerPort: 5557, name: master-p1 }
+            - { containerPort: 5558, name: master-p2 }
+          env:
+            - { name: HOST, value: "http://api-gateway.apps.svc.cluster.local:8888" }
+          volumeMounts:
+            - { name: locustfile, mountPath: /locust }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: locustfile
+          configMap: { name: locustfile }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-worker
+  namespace: loadtest
+  labels: { app: locust, role: worker }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: locust, role: worker }
+  template:
+    metadata:
+      labels: { app: locust, role: worker }
+    spec:
+      nodeSelector:
+        role: loadgen
+      containers:
+        - name: worker
+          image: locustio/locust:2.31.3
+          args: ["-f", "/locust/locustfile.py",
+                 "--worker",
+                 "--master-host=locust-master",
+                 "--master-port=5557"]
+          env:
+            - { name: HOST, value: "http://api-gateway.apps.svc.cluster.local:8888" }
+          volumeMounts:
+            - { name: locustfile, mountPath: /locust }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: locustfile
+          configMap: { name: locustfile }

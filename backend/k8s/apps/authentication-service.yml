@@ -16,11 +16,25 @@ spec:
       labels:
         app: authentication-service
     spec:
+      # --- ADDED: ép pod chạy trên worker dành cho apps/infra/monitoring
+      nodeSelector:
+        role: app
       containers:
         - name: authentication-service
           image: ducanhvo/new-authentication-service:latest
           ports:
-            - containerPort: 8084
+            - name: http                 # ← giữ nguyên port HTTP
+              containerPort: 8084
+            - name: metrics              # ← Thêm port “metrics” để Prometheus scrape
+              containerPort: 8084
+          # --- ADDED: baseline requests/limits để scheduler ổn định (tùy chỉnh theo thực tế)
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: SPRING_DATASOURCE_URL
               value: jdbc:mysql://mysql.infra.svc.cluster.local:3306/userdb
@@ -38,11 +52,18 @@ kind: Service
 metadata:
   name: authentication-service
   namespace: apps
+  labels:
+    app: authentication-service
 spec:
   selector:
     app: authentication-service
   ports:
-    - protocol: TCP
+    - name: http                     # ← port cho traffic ứng dụng
+      protocol: TCP
       port: 8084
-      targetPort: 8084
+      targetPort: http
+    - name: metrics                  # ← Thêm port ClusterIP “metrics” cho Prometheus
+      protocol: TCP
+      port: 9090                     # ← port mới mà Prometheus sẽ gọi
+      targetPort: metrics            # ← map về containerPort=8084 (port “metrics”)
   type: ClusterIP

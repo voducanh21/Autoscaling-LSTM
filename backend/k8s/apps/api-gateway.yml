@@ -16,11 +16,25 @@ spec:
       labels:
         app: api-gateway
     spec:
+      # --- ADDED: ép pod chạy trên worker “apps/infra/monitoring”
+      nodeSelector:
+        role: app
       containers:
         - name: api-gateway
           image: ducanhvo/new-api-gateway:latest
           ports:
-            - containerPort: 8888
+            - name: http
+              containerPort: 8888       # port chính dùng cho traffic ứng dụng
+            - name: metrics
+              containerPort: 8888       # cùng containerPort, để ServiceMonitor trỏ vào
+          # --- ADDED: baseline requests/limits để scheduler đỡ nghẽn (điều chỉnh theo thực tế)
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: PRODUCT_SERVICE_URL
               valueFrom:
@@ -53,11 +67,18 @@ kind: Service
 metadata:
   name: api-gateway
   namespace: apps
+  labels:
+    app: api-gateway
 spec:
   selector:
     app: api-gateway
   ports:
-    - protocol: TCP
+    - name: http
+      protocol: TCP
       port: 8888
-      targetPort: 8888
+      targetPort: http
+    - name: metrics
+      protocol: TCP
+      port: 9090                  # port ClusterIP mới dành cho Prometheus
+      targetPort: metrics         # map về containerPort 8888
   type: ClusterIP

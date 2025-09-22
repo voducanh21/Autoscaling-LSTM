@@ -1,0 +1,170 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "2.0.0" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "RPS (svc:qps:rate1m)",
+      "id": 1,
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "svc:qps:rate1m{job=~\"$service\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 Latency (ms, 1m)",
+      "id": 2,
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "drawStyle": "line", "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "svc:latency_p95_ms_1m{job=~\"$service\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Usage per Pod (cores, 1m)",
+      "id": 3,
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "cores", "custom": { "stacking": { "mode": "normal" }, "drawStyle": "line" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "pod:cpu:usage1m{namespace=\"apps\",pod=~\"${service:regex}-.*\"}",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Usage per Pod (bytes)",
+      "id": 4,
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "stacking": { "mode": "normal" }, "drawStyle": "line" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "pod:mem:usage{namespace=\"apps\",pod=~\"${service:regex}-.*\"}",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Available Replicas (Deployment)",
+      "id": 5,
+      "datasource": "${DS_PROMETHEUS}",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "none", "custom": { "drawStyle": "line", "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas_available{deployment=~\"$deployment\"}",
+          "legendFormat": "{{deployment}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["autoscaling", "k8s", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "service",
+        "label": "Service (job)",
+        "hide": 0,
+        "datasource": "${DS_PROMETHEUS}",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "query": "label_values(svc:qps:rate1m, job)",
+        "regex": "",
+        "sort": 1,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "deployment",
+        "label": "Deployment",
+        "hide": 0,
+        "datasource": "${DS_PROMETHEUS}",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "query": "label_values(kube_deployment_status_replicas_available, deployment)",
+        "regex": "",
+        "sort": 1,
+        "current": {}
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["5s", "10s", "15s", "30s", "1m", "5m"] },
+  "timezone": "Asia/Ho_Chi_Minh",
+  "title": "Services Observability (QPS, p95, CPU, Mem, Replicas)",
+  "version": 4,
+  "weekStart": ""
+}

@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lstm-train-daily
+  namespace: apps
+spec:
+  schedule: "0 1 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          volumes:
+            - name: data-pvc
+              persistentVolumeClaim:
+                claimName: metrics-data-pvc
+          initContainers:
+            - name: ensure-folders
+              image: busybox:1.36
+              command: ["sh","-lc","mkdir -p /data/models"]
+              volumeMounts:
+                - name: data-pvc
+                  mountPath: /data
+          containers:
+            - name: trainer
+              image: ducanhvo/autoscaling-trainer:latest
+              imagePullPolicy: IfNotPresent
+              args:
+                - --data_glob
+                - /data/*.csv
+                - --outdir
+                - /data/models
+              volumeMounts:
+                - name: data-pvc
+                  mountPath: /data

@@ -1,0 +1,57 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: svc-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus
+spec:
+  groups:
+    - name: services.rules
+      interval: 30s
+      rules:
+        # ===== RPS (Micrometer counter), cửa sổ 1 phút =====
+        - record: "svc:qps:rate1m"
+          expr: |
+            sum by (job) (
+              rate(http_server_requests_seconds_count{namespace="apps"}[1m])
+            )
+
+        - record: "svc:qps:rate1m:noactuator"
+          expr: |
+            sum by (job) (
+              rate(http_server_requests_seconds_count{namespace="apps", uri!~".*actuator.*"}[1m])
+            )
+
+        # ===== p95 latency, 1 phút =====
+        - record: "svc:latency_p95_s_1m"
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, job) (
+                rate(http_server_requests_seconds_bucket{namespace="apps"}[1m])
+              )
+            )
+
+        - record: "svc:latency_p95_ms_1m"
+          expr: 1000 * svc:latency_p95_s_1m
+
+        # ===== CPU theo POD (cores), 1 phút =====
+        - record: "pod:cpu:usage1m"
+          expr: |
+            sum by (namespace, pod) (
+              rate(container_cpu_usage_seconds_total{
+                namespace="apps",
+                container!="POD"
+              }[1m])
+            )
+
+        # ===== Memory theo POD (bytes) - gauge =====
+        - record: "pod:mem:usage"
+          expr: |
+            sum by (namespace, pod) (
+              container_memory_working_set_bytes{
+                namespace="apps",
+                container!="POD"
+              }
+            )

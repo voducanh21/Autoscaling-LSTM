@@ -14,3 +14,23 @@ spring:
 
 server:
   port: 8081
+
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
+
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    # bật histogram cho http.server.requests
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true

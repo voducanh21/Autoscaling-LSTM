@@ -16,11 +16,25 @@ spec:
       labels:
         app: product-service
     spec:
+      # --- ADDED: ép pod product-service chạy trên worker role=app
+      nodeSelector:
+        role: app
       containers:
         - name: product-service
-          image: ducanhvo/new-product-service:latest  # thay đổi nếu dùng tag khác
+          image: ducanhvo/new-product-service:latest  # đổi tag nếu cần
           ports:
-            - containerPort: 8081
+            - name: http                # ← giữ port HTTP
+              containerPort: 8081
+            - name: metrics             # ← thêm port “metrics” để Prometheus scrape
+              containerPort: 8081
+          # --- ADDED: baseline requests/limits để scheduler ổn định hơn
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: SPRING_DATASOURCE_URL
               value: jdbc:postgresql://postgres.infra.svc.cluster.local:5432/productdb
@@ -34,11 +48,18 @@ kind: Service
 metadata:
   name: product-service
   namespace: apps
+  labels:
+    app: product-service
 spec:
   selector:
     app: product-service
   ports:
-    - protocol: TCP
+    - name: http                     # ← port cho traffic ứng dụng
+      protocol: TCP
       port: 8081
-      targetPort: 8081
+      targetPort: http
+    - name: metrics                  # ← thêm port ClusterIP “metrics” cho Prometheus
+      protocol: TCP
+      port: 9090                     # ← port mới mà Prometheus sẽ gọi
+      targetPort: metrics            # ← map về containerPort=8081 (port “metrics”)
   type: ClusterIP

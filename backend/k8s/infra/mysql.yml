@@ -7,6 +7,7 @@ metadata:
 type: Opaque
 data:
   mysql_root_password: cm9vdA==  # base64 của "root"
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -17,6 +18,7 @@ data:
   initdb.sql: |
     CREATE DATABASE IF NOT EXISTS userdb;
     CREATE DATABASE IF NOT EXISTS paymentdb;
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -24,12 +26,14 @@ metadata:
   name: mysql-pvc
   namespace: infra
 spec:
-  storageClassName: standard  # hoặc bỏ dòng này nếu dùng local hoặc không dùng AWS
+  # --- CHANGED: dùng StorageClass "standard-wffc" để PV gắn đúng node role=app
+  storageClassName: standard-wffc
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 1Gi   # --- CHANGED: tăng từ 1Gi -> 5Gi (bạn có thể giữ 1Gi nếu muốn)
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,11 +52,22 @@ spec:
       labels:
         app: mysql
     spec:
+      # --- ADDED: ép MySQL chạy trên worker dành cho apps/infra/monitoring
+      nodeSelector:
+        role: app
       containers:
         - name: mysql
           image: mysql:8.3.0
           ports:
             - containerPort: 3306
+          # --- ADDED: baseline resources để scheduler ổn định
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
           env:
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
@@ -71,6 +86,7 @@ spec:
         - name: mysql-initdb-config
           configMap:
             name: mysql-initdb-config
+
 ---
 apiVersion: v1
 kind: Service

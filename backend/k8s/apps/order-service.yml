@@ -16,11 +16,25 @@ spec:
       labels:
         app: order-service
     spec:
+      # --- ADDED: ép pod order-service chạy trên worker role=app
+      nodeSelector:
+        role: app
       containers:
         - name: order-service
-          image: ducanhvo/new-order-service:latest  # đổi đúng tên image
+          image: ducanhvo/new-order-service:latest  # đổi đúng tên image nếu cần
           ports:
-            - containerPort: 8083
+            - name: http                 # ← giữ port HTTP
+              containerPort: 8083
+            - name: metrics              # ← thêm port “metrics” để Prometheus scrape
+              containerPort: 8083
+          # --- ADDED: baseline requests/limits để scheduler ổn định hơn
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
           env:
             - name: SPRING_DATA_MONGODB_URI
               value: mongodb://root:password@mongo.infra.svc.cluster.local:27017/orderdb?authSource=admin
@@ -30,11 +44,18 @@ kind: Service
 metadata:
   name: order-service
   namespace: apps
+  labels:
+    app: order-service
 spec:
   selector:
     app: order-service
   ports:
-    - protocol: TCP
+    - name: http                     # ← port cho traffic ứng dụng
+      protocol: TCP
       port: 8083
-      targetPort: 8083
+      targetPort: http
+    - name: metrics                  # ← thêm port ClusterIP “metrics” cho Prometheus
+      protocol: TCP
+      port: 9090                     # ← port mới mà Prometheus sẽ gọi
+      targetPort: metrics            # ← map về containerPort=8083 (port “metrics”)
   type: ClusterIP
