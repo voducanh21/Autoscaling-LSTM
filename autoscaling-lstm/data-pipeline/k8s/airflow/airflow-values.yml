@@ -1,7 +1,11 @@
-# Executor: dùng KubernetesExecutor (đơn giản, không cần Celery)
+# Dùng KubernetesExecutor
 executor: KubernetesExecutor
 
-# Kết nối tới Postgres Bitnami đã cài
+# KHÓA QUAN TRỌNG: tắt Postgres nội bộ của chart
+postgresql:
+  enabled: false
+
+# Kết nối tới Bitnami Postgres bên ngoài
 data:
   metadataConnection:
     user: "airflow"
@@ -11,45 +15,42 @@ data:
     port: 5432
     db: "airflowdb"
 
-# Tạo user admin mặc định
+# User admin mặc định
 web:
   defaultUser:
     enabled: true
     username: admin
     password: admin
 
-# Gắn secrets ENV cho toàn bộ pod
+# Secret chứa FERNET KEY (bạn đã tạo)
 envFrom:
   - secretRef:
       name: airflow-secrets
 
-# Git-sync DAGs (kéo từ repo của bạn)
+# Git-sync DAGs từ repo private
 dags:
   gitSync:
     enabled: true
     repo: "https://github.com/voducanh21/Autoscaling-LSTM.git"
     branch: "main"
-    subPath: "autoscaling-lstm/data-pipeline/dags"   # thư mục chứa các DAG trong repo
+    subPath: "autoscaling-lstm/data-pipeline/dags"  # ĐÚNG path DAGs trong repo của bạn
     depth: 1
     wait: 60
-    maxFailures: 0
+    credentials:
+      usernameSecret:
+        name: dags-git-cred
+        key: username
+      passwordSecret:
+        name: dags-git-cred
+        key: password
 
-# (tuỳ chọn) cắm thêm volume chứa config/files nếu cần
-# extraVolumes:
-#   - name: extra-config
-#     secret:
-#       secretName: airflow-secrets
-# extraVolumeMounts:
-#   - name: extra-config
-#     mountPath: /opt/airflow/extra
-
-# Scheduler/Triggerer/Webserver resource thấp cho Minikube
+# Tài nguyên nhẹ cho Minikube
 scheduler:
+  replicas: 1
   resources:
     requests:
       cpu: 100m
       memory: 256Mi
-  replicas: 1
 
 triggerer:
   resources:
@@ -65,8 +66,7 @@ webserver:
       cpu: 100m
       memory: 256Mi
 
-
-# Ingress (dựa trên addon ingress của Minikube)
+# Ingress
 ingress:
   enabled: true
   web:
@@ -76,13 +76,13 @@ ingress:
   api:
     enabled: false
 
-# Logging/Persistence (đơn giản hoá; Minikube đủ xài)
+# Logs (PVC nhỏ)
 logs:
   persistence:
     enabled: true
     size: 2Gi
 
-# Bật chế độ cơ bản, tránh chạm vào probe schema
+# Một vài config Airflow
 airflow:
   config:
     core:
