@@ -1,0 +1,32 @@
+global:
+  postgresql:
+    auth:
+      username: airflow
+      password: airflowpass
+      database: airflowdb
+
+primary:
+  persistence:
+    enabled: true
+    size: 8Gi
+  # Fix Permission Denied trên Windows hostPath
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1001
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1001
+  volumePermissions:
+    enabled: true
+    image:
+      registry: docker.io
+      repository: bitnami/os-shell
+      tag: "12-debian-12-rXX"
+    resources: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
