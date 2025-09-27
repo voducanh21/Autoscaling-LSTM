@@ -36,7 +36,7 @@ dags:
     subPath: "autoscaling-lstm/data-pipeline/dags"  # ĐÚNG path DAGs trong repo của bạn
     depth: 1
     wait: 60
-    credentials: "dags-git-cred"
+    credentialsSecret: "dags-git-cred"
 
 # Tài nguyên nhẹ cho Minikube
 scheduler:
