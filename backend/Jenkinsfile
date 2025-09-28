@@ -1,11 +1,11 @@
 pipeline {
     agent any
     environment {
-        DOCKERHUB_USER = credentials('dockerhub-user')
-        DOCKERHUB_PASS = credentials('dockerhub-pass')
-        GIT_CRED = credentials('git-cred')
-        REPO = 'https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git'
-        IMAGE_NAME = 'your-app'
+        DOCKERHUB_TOKEN = credentials('dckr_pat_kPqktvIeWLBlIokXyQyNCTkIdcM')
+        GITHUB_TOKEN = credentials('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')
+        SONAR_TOKEN = credentials('71bfed0ad55a78ade757df01a2b475661a11b18c')
+        REPO = 'https://github.com/lvpdung/E-commerce_Web.git'
+        IMAGE_NAME = 'ecommerce-web'
         SONARQUBE_ENV = 'SonarQubeServer' 
     }
     stages {
@@ -31,8 +31,12 @@ pipeline {
             steps {
                 script {
                     def tag = "${env.IMAGE_NAME}:${env.BUILD_ID}-${new Date().format('yyyyMMddHHmmss')}"
-                    sh "docker build -t ${env.DOCKERHUB_USER}/${tag} ."
-                    sh "docker push ${env.DOCKERHUB_USER}/${tag}"
+                    sh """
+                        echo "${env.DOCKERHUB_TOKEN_PSW}" | docker login -u "${env.DOCKERHUB_TOKEN_USR}" --password-stdin
+                        docker build -t ${tag} .
+                        docker push ${tag}
+                        docker logout
+                    """
                     env.IMAGE_TAG = tag
                 }
             }
@@ -49,11 +53,11 @@ pipeline {
                     sh "yamllint k8s/deployment.yaml"
                     sh "git config user.email 'ci@yourdomain.com'"
                     sh "git config user.name 'CI Bot'"
-                    withCredentials([usernamePassword(credentialsId: env.GIT_CRED, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                        sh "git add k8s/deployment.yaml"
-                        sh "git commit -m 'Update image tag to ${env.IMAGE_TAG}'"
-                        sh "git push https://${GIT_USER}:${GIT_PASS}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git main"
-                    }
+                    sh """
+                        git add k8s/deployment.yaml
+                        git commit -m 'Update image tag to ${env.IMAGE_TAG}'
+                        git push https://x-access-token:${env.GITHUB_TOKEN}@github.com/lvpdung/E-commerce_Web.git HEAD:phuongdung
+                    """
                 }
             }
         }
