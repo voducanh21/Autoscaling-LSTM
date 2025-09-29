@@ -28,11 +28,15 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
-    # Resource requirements (chung cho 3 task)
-    resources = k8s.V1ResourceRequirements(
-        requests={"cpu": "100m", "memory": "128Mi"},
-        limits={"cpu": "500m", "memory": "512Mi"},
-    )
+    # cấu hình resource chung (đưa vào executor_config)
+    executor_config = {
+        "pod_override": {
+            "resources": {
+                "requests": {"cpu": "100m", "memory": "128Mi"},
+                "limits": {"cpu": "500m", "memory": "512Mi"},
+            }
+        }
+    }
 
     # ----------------------------------------------------------------------
     # 1️⃣ Bronze Layer
@@ -56,23 +60,10 @@ with DAG(
             "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        env_from=[
-            k8s.V1EnvFromSource(
-                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
-            )
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        pod_override=k8s.V1Pod(  # ✅ dùng pod_override thay vì resources=
-            spec=k8s.V1PodSpec(
-                containers=[
-                    k8s.V1Container(
-                        name="base",
-                        resources=resources,
-                    )
-                ]
-            )
-        ),
+        executor_config=executor_config,  # ✅ dùng executor_config thay cho resources/pod_override
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -99,23 +90,10 @@ with DAG(
             "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        env_from=[
-            k8s.V1EnvFromSource(
-                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
-            )
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        pod_override=k8s.V1Pod(  # ✅ patch resource ở đây
-            spec=k8s.V1PodSpec(
-                containers=[
-                    k8s.V1Container(
-                        name="base",
-                        resources=resources,
-                    )
-                ]
-            )
-        ),
+        executor_config=executor_config,  # ✅ an toàn tuyệt đối trên Airflow 3.1
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -142,27 +120,13 @@ with DAG(
             "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        env_from=[
-            k8s.V1EnvFromSource(
-                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
-            )
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        pod_override=k8s.V1Pod(  # ✅ same pattern
-            spec=k8s.V1PodSpec(
-                containers=[
-                    k8s.V1Container(
-                        name="base",
-                        resources=resources,
-                    )
-                ]
-            )
-        ),
+        executor_config=executor_config,  # ✅ vẫn dùng executor_config
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
     )
 
-    # DAG pipeline
     bronze >> silver >> gold
