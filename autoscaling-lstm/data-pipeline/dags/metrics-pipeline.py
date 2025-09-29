@@ -11,12 +11,12 @@ default_args = {
 
 with DAG(
         dag_id="metrics_pipeline",
-        description="Bronze → Silver metrics pipeline",
-        schedule="*/5 * * * *",     # chạy mỗi 5 phút
+        description="Bronze → Silver → Gold metrics pipeline",
+        schedule="*/5 * * * *",  # chạy mỗi 5 phút
         start_date=datetime(2025, 9, 1),
         catchup=False,
         default_args=default_args,
-        tags=["bronze","silver"],
+        tags=["bronze", "silver", "gold"],
 ) as dag:
 
     # Mount scripts từ ConfigMap 'pipeline-scripts' vào /app
@@ -28,20 +28,21 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
+    # ----------------------------------------------------------------------
+    # 1️⃣ Bronze Layer — dump metrics từ Prometheus về S3 (bronze)
+    # ----------------------------------------------------------------------
     bronze = KubernetesPodOperator(
         task_id="bronze_metrics",
         name="bronze-metrics",
         namespace="ops",
         image="python:3.11-slim",
         image_pull_policy="IfNotPresent",
-        cmds=["/bin/sh","-lc"],
+        cmds=["/bin/sh", "-lc"],
         arguments=[
-            # cài tối thiểu các package cần thiết
             "pip install -q pandas pyarrow requests fsspec s3fs tzdata && "
             "python /app/metrics_dumper.py"
         ],
         env_vars={
-            # THAM SỐ HÓA – chỉnh theo cụm của bạn
             "PROM_URL": "http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",
             "METRICS_NS": "ops",
             "S3_BUCKET": "datalake",
@@ -49,28 +50,30 @@ with DAG(
             "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        # Lấy key/secret MinIO từ Secret (tạo ở ns ops: 'minio-cred')
-        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
+        env_from=[
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+        ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources={
-            "request_memory": "128Mi",
-            "request_cpu": "100m",
-            "limit_memory": "512Mi",
-            "limit_cpu": "500m",
+        resources={  # ✅ Airflow 3.1 format
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
         },
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
     )
 
+    # ----------------------------------------------------------------------
+    # 2️⃣ Silver Layer — xử lý dữ liệu bronze thành silver
+    # ----------------------------------------------------------------------
     silver = KubernetesPodOperator(
         task_id="silver_metrics",
         name="silver-metrics",
         namespace="ops",
         image="python:3.11-slim",
         image_pull_policy="IfNotPresent",
-        cmds=["/bin/sh","-lc"],
+        cmds=["/bin/sh", "-lc"],
         arguments=[
             "pip install -q pandas pyarrow numpy fsspec s3fs tzdata && "
             "python /app/silver_builder.py"
@@ -82,16 +85,56 @@ with DAG(
             "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
+        env_from=[
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+        ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources=k8s.V1ResourceRequirements(
-            requests={"cpu":"100m","memory":"128Mi"},
-            limits={"cpu":"500m","memory":"512Mi"},
-        ),
+        resources={  # ✅ fixed (dict format)
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        },
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
     )
 
-    bronze >> silver
+    # ----------------------------------------------------------------------
+    # 3️⃣ Gold Layer — tổng hợp dữ liệu silver thành gold
+    # ----------------------------------------------------------------------
+    gold = KubernetesPodOperator(
+        task_id="gold_metrics",
+        name="gold-metrics",
+        namespace="ops",
+        image="python:3.11-slim",
+        image_pull_policy="IfNotPresent",
+        cmds=["/bin/sh", "-lc"],
+        arguments=[
+            "pip install -q pandas pyarrow numpy fsspec s3fs tzdata && "
+            "python /app/gold_aggregator.py"
+        ],
+        env_vars={
+            "S3_BUCKET": "datalake",
+            "SILVER_PREFIX": "silver/metrics",
+            "GOLD_PREFIX": "gold/metrics",
+            "S3_ENDPOINT": "http://minio.ops.svc.cluster.local:9000",
+            "TIMEZONE": "Asia/Ho_Chi_Minh",
+        },
+        env_from=[
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+        ],
+        volumes=[volume_scripts],
+        volume_mounts=[mount_scripts],
+        resources={  # ✅ same consistent format
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        },
+        get_logs=True,
+        is_delete_operator_pod=True,
+        service_account_name="airflow-runner",
+    )
+
+    # ----------------------------------------------------------------------
+    # DAG flow definition
+    # ----------------------------------------------------------------------
+    bronze >> silver >> gold
