@@ -1,0 +1,50 @@
+executor: KubernetesExecutor
+
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: "airflow"
+    pass: "airflowpass"
+    protocol: "postgresql"
+    host: "airflow-pg-postgresql.ops.svc.cluster.local"
+    port: 5432
+    db: "airflowdb"
+
+web:
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin
+
+images:
+  airflow:
+    repository: ducanhvo/airflow-mlops
+    tag: "3.1.0"
+    pullPolicy: IfNotPresent
+
+
+
+# >>> Thêm ENV để cài provider lúc start (không cần constraints)
+env:
+  - name: PIP_ADDITIONAL_REQUIREMENTS
+    value: "apache-airflow-providers-cncf-kubernetes==10.0.0 kubernetes==29.0.0"
+# <<<
+
+dags:
+  gitSync:
+    enabled: true
+    repo: "https://github.com/voducanh21/Autoscaling-LSTM.git"
+    branch: "main"
+    subPath: "autoscaling-lstm/data-pipeline/dags"
+    depth: 1
+    wait: 60
+    credentialsSecret: "dags-git-cred"   # bật nếu repo private
+
+envFrom:
+  - secretRef:
+      name: airflow-secrets
+
+securityContext:
+  fsGroup: 1000
