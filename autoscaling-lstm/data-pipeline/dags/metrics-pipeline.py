@@ -53,10 +53,12 @@ with DAG(
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources=k8s.V1ResourceRequirements(
-            requests={"cpu":"100m","memory":"128Mi"},
-            limits={"cpu":"500m","memory":"512Mi"},
-        ),
+        resources={
+            "request_memory": "128Mi",
+            "request_cpu": "100m",
+            "limit_memory": "512Mi",
+            "limit_cpu": "500m",
+        },
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
