@@ -55,10 +55,10 @@ with DAG(
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources={  # ✅ Airflow 3.1 format
-            "requests": {"cpu": "100m", "memory": "128Mi"},
-            "limits": {"cpu": "500m", "memory": "512Mi"},
-        },
+        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
+            requests={"cpu": "100m", "memory": "128Mi"},
+            limits={"cpu": "500m", "memory": "512Mi"},
+        ),
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -90,10 +90,10 @@ with DAG(
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources={  # ✅ fixed (dict format)
-            "requests": {"cpu": "100m", "memory": "128Mi"},
-            "limits": {"cpu": "500m", "memory": "512Mi"},
-        },
+        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
+            requests={"cpu": "100m", "memory": "128Mi"},
+            limits={"cpu": "500m", "memory": "512Mi"},
+        ),
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -125,10 +125,10 @@ with DAG(
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources={  # ✅ same consistent format
-            "requests": {"cpu": "100m", "memory": "128Mi"},
-            "limits": {"cpu": "500m", "memory": "512Mi"},
-        },
+        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
+            requests={"cpu": "100m", "memory": "128Mi"},
+            limits={"cpu": "500m", "memory": "512Mi"},
+        ),
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
