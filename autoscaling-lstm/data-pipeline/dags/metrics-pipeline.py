@@ -22,14 +22,20 @@ with DAG(
     # Mount scripts từ ConfigMap 'pipeline-scripts' vào /app
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
-        config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts")
+        config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
     )
     mount_scripts = k8s.V1VolumeMount(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
+    # Resource requirements (chung cho 3 task)
+    resources = k8s.V1ResourceRequirements(
+        requests={"cpu": "100m", "memory": "128Mi"},
+        limits={"cpu": "500m", "memory": "512Mi"},
+    )
+
     # ----------------------------------------------------------------------
-    # 1️⃣ Bronze Layer — dump metrics từ Prometheus về S3 (bronze)
+    # 1️⃣ Bronze Layer
     # ----------------------------------------------------------------------
     bronze = KubernetesPodOperator(
         task_id="bronze_metrics",
@@ -51,13 +57,21 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+            k8s.V1EnvFromSource(
+                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
+            )
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
-            requests={"cpu": "100m", "memory": "128Mi"},
-            limits={"cpu": "500m", "memory": "512Mi"},
+        pod_override=k8s.V1Pod(  # ✅ dùng pod_override thay vì resources=
+            spec=k8s.V1PodSpec(
+                containers=[
+                    k8s.V1Container(
+                        name="base",
+                        resources=resources,
+                    )
+                ]
+            )
         ),
         get_logs=True,
         is_delete_operator_pod=True,
@@ -65,7 +79,7 @@ with DAG(
     )
 
     # ----------------------------------------------------------------------
-    # 2️⃣ Silver Layer — xử lý dữ liệu bronze thành silver
+    # 2️⃣ Silver Layer
     # ----------------------------------------------------------------------
     silver = KubernetesPodOperator(
         task_id="silver_metrics",
@@ -86,13 +100,21 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+            k8s.V1EnvFromSource(
+                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
+            )
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
-            requests={"cpu": "100m", "memory": "128Mi"},
-            limits={"cpu": "500m", "memory": "512Mi"},
+        pod_override=k8s.V1Pod(  # ✅ patch resource ở đây
+            spec=k8s.V1PodSpec(
+                containers=[
+                    k8s.V1Container(
+                        name="base",
+                        resources=resources,
+                    )
+                ]
+            )
         ),
         get_logs=True,
         is_delete_operator_pod=True,
@@ -100,7 +122,7 @@ with DAG(
     )
 
     # ----------------------------------------------------------------------
-    # 3️⃣ Gold Layer — tổng hợp dữ liệu silver thành gold
+    # 3️⃣ Gold Layer
     # ----------------------------------------------------------------------
     gold = KubernetesPodOperator(
         task_id="gold_metrics",
@@ -121,20 +143,26 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+            k8s.V1EnvFromSource(
+                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
+            )
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        resources=k8s.V1ResourceRequirements(     # ✅ revert về kiểu cũ
-            requests={"cpu": "100m", "memory": "128Mi"},
-            limits={"cpu": "500m", "memory": "512Mi"},
+        pod_override=k8s.V1Pod(  # ✅ same pattern
+            spec=k8s.V1PodSpec(
+                containers=[
+                    k8s.V1Container(
+                        name="base",
+                        resources=resources,
+                    )
+                ]
+            )
         ),
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
     )
 
-    # ----------------------------------------------------------------------
-    # DAG flow definition
-    # ----------------------------------------------------------------------
+    # DAG pipeline
     bronze >> silver >> gold
