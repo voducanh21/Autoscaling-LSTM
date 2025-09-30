@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from kubernetes.client import models as k8s
+from kubernetes import client as k8s  # ✅ không dùng models
 
 default_args = {
     "owner": "autoscaling",
@@ -12,13 +12,12 @@ default_args = {
 with DAG(
         dag_id="metrics_pipeline",
         description="Bronze → Silver → Gold metrics pipeline",
-        schedule="*/5 * * * *",  # chạy mỗi 5 phút
+        schedule="*/5 * * * *",
         start_date=datetime(2025, 9, 1),
         catchup=False,
         default_args=default_args,
         tags=["bronze", "silver", "gold"],
 ) as dag:
-
     # Mount scripts từ ConfigMap 'pipeline-scripts' vào /app
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
@@ -28,18 +27,11 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
-    # cấu hình resource chung (đưa vào executor_config)
-    executor_config = {
-        "KubernetesExecutor": {
-            "resources": {
-                "request_cpu": "100m",
-                "request_memory": "128Mi",
-                "limit_cpu": "500m",
-                "limit_memory": "512Mi",
-            }
-        }
-    }
-
+    # Cấu hình resource chuẩn Airflow 3.1
+    pod_resources = k8s.V1ResourceRequirements(
+        requests={"cpu": "100m", "memory": "128Mi"},
+        limits={"cpu": "500m", "memory": "512Mi"},
+    )
 
     # ----------------------------------------------------------------------
     # 1️⃣ Bronze Layer
@@ -66,7 +58,7 @@ with DAG(
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        executor_config=executor_config,  # ✅ dùng executor_config thay cho resources/pod_override
+        container_resources=pod_resources,  # ✅ thay executor_config
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -96,7 +88,7 @@ with DAG(
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        executor_config=executor_config,  # ✅ an toàn tuyệt đối trên Airflow 3.1
+        container_resources=pod_resources,
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
@@ -126,7 +118,7 @@ with DAG(
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        executor_config=executor_config,  # ✅ vẫn dùng executor_config
+        container_resources=pod_resources,
         get_logs=True,
         is_delete_operator_pod=True,
         service_account_name="airflow-runner",
