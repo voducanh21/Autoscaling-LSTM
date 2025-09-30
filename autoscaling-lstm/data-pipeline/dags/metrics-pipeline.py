@@ -12,7 +12,7 @@ default_args = {
 with DAG(
         dag_id="metrics_pipeline",
         description="Bronze → Silver → Gold metrics pipeline",
-        schedule="*/5 * * * *",
+        schedule="*/5 * * * *",  # chạy mỗi 5 phút
         start_date=datetime(2025, 9, 1),
         catchup=False,
         default_args=default_args,
@@ -58,9 +58,9 @@ with DAG(
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
-        container_resources=pod_resources,  # ✅ thay executor_config
+        container_resources=pod_resources,
         get_logs=True,
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,  # ⚠️ giữ pod lại để xem log
         service_account_name="airflow-runner",
     )
 
@@ -90,7 +90,7 @@ with DAG(
         volume_mounts=[mount_scripts],
         container_resources=pod_resources,
         get_logs=True,
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,  # ⚠️ giữ pod
         service_account_name="airflow-runner",
     )
 
@@ -120,7 +120,7 @@ with DAG(
         volume_mounts=[mount_scripts],
         container_resources=pod_resources,
         get_logs=True,
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,  # ⚠️ giữ pod
         service_account_name="airflow-runner",
     )
 

@@ -30,6 +30,15 @@ images:
 env:
   - name: PIP_ADDITIONAL_REQUIREMENTS
     value: "apache-airflow-providers-cncf-kubernetes==10.0.0 kubernetes==29.0.0"
+
+  - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_HOST
+    value: "airflow-logs-service.ops.svc.cluster.local"
+
+  - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_PORT
+    value: "8793"
+
+  - name: AIRFLOW__KUBERNETES__DELETE_WORKER_PODS
+    value: "True"
 # <<<
 
 dags:
