@@ -30,13 +30,16 @@ with DAG(
 
     # cấu hình resource chung (đưa vào executor_config)
     executor_config = {
-        "pod_override": {
+        "KubernetesExecutor": {
             "resources": {
-                "requests": {"cpu": "100m", "memory": "128Mi"},
-                "limits": {"cpu": "500m", "memory": "512Mi"},
+                "request_cpu": "100m",
+                "request_memory": "128Mi",
+                "limit_cpu": "500m",
+                "limit_memory": "512Mi",
             }
         }
     }
+
 
     # ----------------------------------------------------------------------
     # 1️⃣ Bronze Layer
