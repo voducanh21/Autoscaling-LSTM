@@ -19,6 +19,7 @@ with DAG(
         tags=["bronze", "metrics"],
 ) as dag:
 
+    # Mount scripts từ ConfigMap chứa metrics_dumper.py
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
         config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
@@ -59,7 +60,10 @@ with DAG(
         volume_mounts=[mount_scripts],
         container_resources=pod_resources,
         get_logs=True,
+        # 🔧 các flag quan trọng để giữ pod và hiển thị log
         is_delete_operator_pod=False,
+        in_cluster=True,
+        config_file=None,
         service_account_name="airflow-runner",
     )
 
