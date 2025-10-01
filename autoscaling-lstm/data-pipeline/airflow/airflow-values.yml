@@ -28,23 +28,19 @@ images:
 # 🔹 ENVIRONMENT VARIABLES
 # ===========================================================
 env:
-  # ✅ Cài thêm provider khi container khởi động
   - name: PIP_ADDITIONAL_REQUIREMENTS
     value: "apache-airflow-providers-cncf-kubernetes==10.0.0 apache-airflow-providers-amazon s3fs kubernetes==29.0.0"
 
-  # ✅ Cho phép Airflow tự xoá worker pods
   - name: AIRFLOW__KUBERNETES__DELETE_WORKER_PODS
     value: "True"
 
-  # ✅ Remote logging sang MinIO
+  # ✅ FIXED: thay $(...) bằng format trực tiếp dùng biến env (được inject từ secret)
   - name: AIRFLOW_CONN_MINIO_DEFAULT
-    value: "s3://$(AWS_ACCESS_KEY_ID):$(AWS_SECRET_ACCESS_KEY)@minio.infra.svc.cluster.local:9000"
+    value: "s3://minioadmin:minioadmin@minio.infra.svc.cluster.local:9000"
 
-  # (Tùy chọn, không cần với Airflow 3.1.0 — giữ lại nếu log-service sẽ được bật trong tương lai)
-  - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_HOST
-    value: "airflow-logs-service.ops.svc.cluster.local"
-  - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_PORT
-    value: "8793"
+  - name: AWS_DEFAULT_REGION
+    value: "us-east-1"
+
 
 # ===========================================================
 # 🔹 DAGS GIT SYNC CONFIG
@@ -66,7 +62,7 @@ envFrom:
   - secretRef:
       name: airflow-secrets
   - secretRef:
-      name: minio-cred     # ✅ chứa AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY
+      name: minio-cred   # ✅ chứa AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY
 
 securityContext:
   fsGroup: 1000
@@ -76,9 +72,19 @@ securityContext:
 # ===========================================================
 config:
   logging:
-    remote_logging: "True"          # ⚠️ dùng chuỗi
+    # ✅ Bật remote logging
+    remote_logging: "True"
+
+    # ✅ ID của connection trỏ đến MinIO
     remote_log_conn_id: "minio_default"
+
+    # ✅ Đường dẫn bucket + prefix lưu log
     remote_base_log_folder: "s3://datalake/airflow-logs"
+
+    # ✅ Log level và encryption
     remote_log_level: "INFO"
     encrypt_s3_logs: "False"
 
+  # (Optional) giảm noisy log ở scheduler
+  core:
+    logging_level: "INFO"
