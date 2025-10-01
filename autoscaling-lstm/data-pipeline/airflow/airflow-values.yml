@@ -24,23 +24,31 @@ images:
     tag: "3.1.0"
     pullPolicy: IfNotPresent
 
-
-
-# >>> Thêm ENV để cài provider lúc start (không cần constraints)
+# ===========================================================
+# 🔹 ENVIRONMENT VARIABLES
+# ===========================================================
 env:
+  # ✅ Cài thêm provider khi container khởi động
   - name: PIP_ADDITIONAL_REQUIREMENTS
-    value: "apache-airflow-providers-cncf-kubernetes==10.0.0 kubernetes==29.0.0"
+    value: "apache-airflow-providers-cncf-kubernetes==10.0.0 apache-airflow-providers-amazon s3fs kubernetes==29.0.0"
 
+  # ✅ Cho phép Airflow tự xoá worker pods
+  - name: AIRFLOW__KUBERNETES__DELETE_WORKER_PODS
+    value: "True"
+
+  # ✅ Remote logging sang MinIO
+  - name: AIRFLOW_CONN_MINIO_DEFAULT
+    value: "s3://$(AWS_ACCESS_KEY_ID):$(AWS_SECRET_ACCESS_KEY)@minio.infra.svc.cluster.local:9000"
+
+  # (Tùy chọn, không cần với Airflow 3.1.0 — giữ lại nếu log-service sẽ được bật trong tương lai)
   - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_HOST
     value: "airflow-logs-service.ops.svc.cluster.local"
-
   - name: AIRFLOW__KUBERNETES__LOGS_SERVICE_PORT
     value: "8793"
 
-  - name: AIRFLOW__KUBERNETES__DELETE_WORKER_PODS
-    value: "True"
-# <<<
-
+# ===========================================================
+# 🔹 DAGS GIT SYNC CONFIG
+# ===========================================================
 dags:
   gitSync:
     enabled: true
@@ -51,9 +59,26 @@ dags:
     wait: 60
     credentialsSecret: "dags-git-cred"   # bật nếu repo private
 
+# ===========================================================
+# 🔹 ENVIRONMENT SOURCES (Secrets)
+# ===========================================================
 envFrom:
   - secretRef:
       name: airflow-secrets
+  - secretRef:
+      name: minio-cred     # ✅ chứa AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY
 
 securityContext:
   fsGroup: 1000
+
+# ===========================================================
+# 🔹 AIRFLOW CONFIG (MinIO Remote Logging)
+# ===========================================================
+config:
+  logging:
+    remote_logging: "True"          # ⚠️ dùng chuỗi
+    remote_log_conn_id: "minio_default"
+    remote_base_log_folder: "s3://datalake/airflow-logs"
+    remote_log_level: "INFO"
+    encrypt_s3_logs: "False"
+
