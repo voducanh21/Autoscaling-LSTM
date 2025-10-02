@@ -1,0 +1,167 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'Maven 3.9.6'
+    }
+
+    environment {
+        DOCKER_CRED_ID = "dockerhub-credentials"
+        GIT_CRED_ID = "github-token"
+        SONAR_CRED_ID = "sonar-token"
+        TIMESTAMP = "${new Date().format('yyyyMMddHHmmss')}"
+        DOCKERHUB_USERNAME = 'lvpdung'
+        REPO = 'https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                git credentialsId: "${GIT_CRED_ID}", url: "${REPO}", branch: 'phuongdung'
+            }
+        }
+
+        stage('Skip Check') {
+            steps {
+                script {
+                    def commitMsg = sh(script: "git log -1 --pretty=%B", returnStdout: true).trim()
+                    echo "🔎 Last commit message: ${commitMsg}"
+                    if (commitMsg.contains("[skip-ci]")) {
+                        echo "🚫 Skipping build due to [skip-ci]"
+                        currentBuild.result = 'SUCCESS'
+                        error("Build stopped due to [skip-ci]")
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def backendServices = ['api-gateway', 'authentication-service', 'product-service', 'order-service', 'payment-service', 'chat-service']
+
+                    backendServices.each { svc ->
+                        dir("backend/${svc}") {
+                            withSonarQubeEnv('SonarQube') {
+                                withCredentials([string(credentialsId: "${SONAR_CRED_ID}", variable: 'SONAR_TOKEN')]) {
+                                    sh "mvn clean verify sonar:sonar -DskipTests -Dsonar.token=${SONAR_TOKEN}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build, Scan, and Push Services') {
+            steps {
+                script {
+                    def services = [
+                        [name: 'api-gateway', image: "${DOCKERHUB_USERNAME}/api-gateway", path: 'backend/api-gateway'],
+                        [name: 'authentication-service', image: "${DOCKERHUB_USERNAME}/authentication-service", path: 'backend/authentication-service'],
+                        [name: 'product-service', image: "${DOCKERHUB_USERNAME}/product-service", path: 'backend/product-service'],
+                        [name: 'order-service', image: "${DOCKERHUB_USERNAME}/order-service", path: 'backend/order-service'],
+                        [name: 'payment-service', image: "${DOCKERHUB_USERNAME}/payment-service", path: 'backend/payment-service'],
+                        [name: 'chat-service', image: "${DOCKERHUB_USERNAME}/chat-service", path: 'backend/chat-service'],
+                        [name: 'frontend', image: "${DOCKERHUB_USERNAME}/ecommerce-frontend", path: 'frontend']
+                    ]
+
+                    def yamlFileMap = [
+                        'api-gateway'           : 'api-gateway.yml',
+                        'authentication-service': 'authentication-service.yml',
+                        'product-service'       : 'product-service.yml',
+                        'order-service'         : 'order-service.yml',
+                        'payment-service'       : 'payment-service.yml',
+                        'chat-service'          : 'chat-service.yml',
+                        'frontend'              : 'frontend.yml'
+                    ]
+
+                    services.each { svc ->
+                        def imageTag = "${svc.image}:${env.TIMESTAMP}"
+                        def yamlPath = "k8s/apps/${yamlFileMap[svc.name]}"
+
+                        dir(svc.path) {
+                            // Build Maven projects for backend services
+                            if (!svc.name.equals('frontend')) {
+                                sh 'mvn clean package -DskipTests'
+                            }
+
+                            // 🔨 Build image
+                            echo "🔨 Building Docker image: ${imageTag}"
+                            sh "docker build -t ${imageTag} ."
+
+                            // 🔍 Trivy Scan
+                            echo "🔐 Scanning image with Trivy: ${imageTag}"
+                            sh """
+                                trivy image \
+                                  --skip-db-update \
+                                  --scanners vuln \
+                                  --severity HIGH,CRITICAL \
+                                  --no-progress \
+                                  ${imageTag} \
+                                  || echo '⚠️ Trivy found vulnerabilities!'
+                            """
+
+                            // 🐳 Push image
+                            withDockerRegistry([credentialsId: "${DOCKER_CRED_ID}", url: ""]) {
+                                echo "🚀 Pushing image: ${imageTag}"
+                                sh "docker push ${imageTag}"
+                            }
+                        }
+
+                        // ✏️ Update manifest if k8s files exist
+                        if (fileExists(yamlPath)) {
+                            def yamlContent = readFile(file: yamlPath)
+                            yamlContent = yamlContent.replaceAll(/image:\s+${svc.image.replace('/', '\\/')}:.*/, "image: ${imageTag}")
+                            writeFile file: yamlPath, text: yamlContent
+                            echo "✅ Updated ${yamlPath} with new image tag"
+                        } else {
+                            echo "⚠️ YAML file not found: ${yamlPath}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Commit YAML to Git') {
+            steps {
+                withCredentials([string(credentialsId: "${GIT_CRED_ID}", variable: 'GITHUB_TOKEN')]) {
+                    script {
+                        sh """
+                            git config user.name "Jenkins CI"
+                            git config user.email "jenkins@ecommerce.local"
+                            git add k8s/ || true
+
+                            if ! git diff --cached --quiet; then
+                                echo "📝 Committing YAML changes..."
+                                git commit -m "ci: update image tags to ${TIMESTAMP} [skip-ci]"
+                                git push https://x-access-token:${GITHUB_TOKEN}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git HEAD:phuongdung
+                                echo "✅ Changes pushed to repository"
+                            else
+                                echo "✅ No YAML changes to commit"
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            echo "🧹 Cleaning up Docker images..."
+            sh """
+                docker image prune -f || true
+                docker system prune -f || true
+            """
+        }
+        success {
+            echo "✅ Pipeline completed successfully!"
+            // Uncomment below if you want email notifications
+            // mail to: 'dev-team@ecommerce.local', subject: "✅ Jenkins Build Success: ${env.JOB_NAME} #${env.BUILD_NUMBER}", body: "Build succeeded! All services deployed with timestamp: ${env.TIMESTAMP}"
+        }
+        failure {
+            echo "❌ Pipeline failed!"
+            // Uncomment below if you want email notifications  
+            // mail to: 'dev-team@ecommerce.local', subject: "❌ Jenkins Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}", body: "Build failed! Check Jenkins console output for details."
+        }
+    }
+}
