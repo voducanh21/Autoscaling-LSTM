@@ -1,0 +1,19 @@
+﻿[
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/initContainers",
+    "value": [
+      {
+        "name": "fix-permission",
+        "image": "busybox",
+        "securityContext": {
+          "privileged": true
+        },
+        "command": ["sh", "-c", "chown -R 1000:1000 /export && chmod -R 777 /export"],
+        "volumeMounts": [
+          { "name": "export", "mountPath": "/export" }
+        ]
+      }
+    ]
+  }
+]

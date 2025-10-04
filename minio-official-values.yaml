@@ -1,0 +1,14 @@
+﻿rootUser: admin
+rootPassword: admin123
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: standard
+service:
+  type: NodePort
+  nodePorts:
+    api: 30000
+    console: 30001
+buckets:
+  - name: mlflow
+  - name: airflow-logs

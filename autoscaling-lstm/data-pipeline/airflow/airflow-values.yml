@@ -1,90 +1,114 @@
-executor: KubernetesExecutor
+# Sử dụng CeleryExecutor để cho phép chạy tác vụ phân tán trên nhiều worker
+executor: CeleryExecutor
 
+# Cấu hình cơ sở dữ liệu metadata (Postgres nội bộ)
 postgresql:
+  auth:
+    username: airflow
+    password: "airflow"
+    database: airflow
+    postgresPassword: "postgres"
+  primary:
+    persistence:
+      enabled: true
+      size: 1Gi
+    podSecurityContext:
+      fsGroup: 1001
+      fsGroupChangePolicy: Always
+    containerSecurityContext:
+      runAsUser: 1001
+  volumePermissions:
+    enabled: true
+    securityContext:
+      runAsUser: 0
+
+# Redis cho Celery
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# Webserver (Airflow UI)
+webserver:
+  service:
+    type: NodePort
+    ports:
+      - name: airflow-ui
+        port: 8080
+        targetPort: 8080
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Scheduler
+scheduler:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+# Workers (Celery)
+workers:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 1Gi
+    fixPermissions: false       # Hỗ trợ chown PVC logs
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 400m
+      memory: 768Mi            # tăng tránh OOM
+
+# Triggerer
+triggerer:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 1Gi
+    fixPermissions: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi            # tăng request
+    limits:
+      cpu: 200m
+      memory: 768Mi            # tăng limit
+  livenessProbe:
+    timeoutSeconds: 60
+    periodSeconds: 60
+    failureThreshold: 10
+  env:
+    - name: AIRFLOW__TRIGGERER__DEFAULT_CAPACITY
+      value: "1"
+
+# Tắt Flower
+flower:
   enabled: false
 
-data:
-  metadataConnection:
-    user: "airflow"
-    pass: "airflowpass"
-    protocol: "postgresql"
-    host: "airflow-pg-postgresql.ops.svc.cluster.local"
-    port: 5432
-    db: "airflowdb"
+# StatsD (Prometheus scrape)
+statsd:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 100m
+      memory: 256Mi
 
-web:
-  defaultUser:
-    enabled: true
-    username: admin
-    password: admin
-
-images:
-  airflow:
-    repository: ducanhvo/airflow-mlops
-    tag: "3.1.0"
-    pullPolicy: IfNotPresent
-
-# ===========================================================
-# 🔹 ENVIRONMENT VARIABLES
-# ===========================================================
-env:
-  - name: PIP_ADDITIONAL_REQUIREMENTS
-    value: "apache-airflow-providers-cncf-kubernetes==10.0.0 apache-airflow-providers-amazon s3fs kubernetes==29.0.0"
-
-  - name: AIRFLOW__KUBERNETES__DELETE_WORKER_PODS
-    value: "True"
-
-  # ✅ FIXED: thay $(...) bằng format trực tiếp dùng biến env (được inject từ secret)
-  - name: AIRFLOW_CONN_MINIO_DEFAULT
-    value: "s3://minioadmin:minioadmin@minio.infra.svc.cluster.local:9000"
-
-  - name: AWS_DEFAULT_REGION
-    value: "us-east-1"
-
-
-# ===========================================================
-# 🔹 DAGS GIT SYNC CONFIG
-# ===========================================================
-dags:
-  gitSync:
-    enabled: true
-    repo: "https://github.com/voducanh21/Autoscaling-LSTM.git"
-    branch: "main"
-    subPath: "autoscaling-lstm/data-pipeline/dags"
-    depth: 1
-    wait: 60
-    credentialsSecret: "dags-git-cred"   # bật nếu repo private
-
-# ===========================================================
-# 🔹 ENVIRONMENT SOURCES (Secrets)
-# ===========================================================
-envFrom:
-  - secretRef:
-      name: airflow-secrets
-  - secretRef:
-      name: minio-cred   # ✅ chứa AWS_ACCESS_KEY_ID và AWS_SECRET_ACCESS_KEY
-
-securityContext:
-  fsGroup: 1000
-
-# ===========================================================
-# 🔹 AIRFLOW CONFIG (MinIO Remote Logging)
-# ===========================================================
-config:
-  logging:
-    # ✅ Bật remote logging
-    remote_logging: "True"
-
-    # ✅ ID của connection trỏ đến MinIO
-    remote_log_conn_id: "minio_default"
-
-    # ✅ Đường dẫn bucket + prefix lưu log
-    remote_base_log_folder: "s3://datalake/airflow-logs"
-
-    # ✅ Log level và encryption
-    remote_log_level: "INFO"
-    encrypt_s3_logs: "False"
-
-  # (Optional) giảm noisy log ở scheduler
-  core:
-    logging_level: "INFO"
+# Không cần logs persistence chung
+logs:
+  persistence:
+    enabled: false
