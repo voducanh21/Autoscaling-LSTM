@@ -10,13 +10,13 @@ pipeline {
         GIT_CRED_ID = "github-token"
         SONAR_CRED_ID = "sonar-token"
         TIMESTAMP = "${new Date().format('yyyyMMddHHmmss')}"
-        DOCKERHUB_USERNAME = 'lvpdung'
+        DOCKERHUB_USERNAME = 'voducanh'
         REPO = 'https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git'
     }
     stages {
         stage('Checkout') {
             steps {
-                git credentialsId: "${GIT_CRED_ID}", url: "${REPO}", branch: 'phuongdung'
+                git credentialsId: "${GIT_CRED_ID}", url: "${REPO}", branch: 'main'
             }
         }
 
@@ -61,7 +61,6 @@ pipeline {
                         [name: 'product-service', image: "${DOCKERHUB_USERNAME}/product-service", path: 'backend/product-service'],
                         [name: 'order-service', image: "${DOCKERHUB_USERNAME}/order-service", path: 'backend/order-service'],
                         [name: 'payment-service', image: "${DOCKERHUB_USERNAME}/payment-service", path: 'backend/payment-service'],
-                        // chat-service removed
                         [name: 'frontend', image: "${DOCKERHUB_USERNAME}/ecommerce-frontend", path: 'frontend']
                     ]
 
@@ -71,7 +70,6 @@ pipeline {
                         'product-service'       : 'product-service.yml',
                         'order-service'         : 'order-service.yml',
                         'payment-service'       : 'payment-service.yml',
-                        // chat-service removed
                         'frontend'              : 'frontend.yml'
                     ]
 
@@ -134,7 +132,7 @@ pipeline {
                             if ! git diff --cached --quiet; then
                                 echo "📝 Committing YAML changes..."
                                 git commit -m "ci: update image tags to ${TIMESTAMP} [skip-ci]"
-                                git push https://x-access-token:${GITHUB_TOKEN}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git HEAD:phuongdung
+                                git push https://x-access-token:${GITHUB_TOKEN}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git HEAD:main
                                 echo "✅ Changes pushed to repository"
                             else
                                 echo "✅ No YAML changes to commit"
