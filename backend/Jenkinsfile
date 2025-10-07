@@ -37,7 +37,7 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    def backendServices = ['api-gateway', 'authentication-service', 'product-service', 'order-service', 'payment-service', 'chat-service']
+                    def backendServices = ['api-gateway', 'authentication-service', 'product-service', 'order-service', 'payment-service']
 
                     backendServices.each { svc ->
                         dir("backend/${svc}") {
@@ -61,7 +61,7 @@ pipeline {
                         [name: 'product-service', image: "${DOCKERHUB_USERNAME}/product-service", path: 'backend/product-service'],
                         [name: 'order-service', image: "${DOCKERHUB_USERNAME}/order-service", path: 'backend/order-service'],
                         [name: 'payment-service', image: "${DOCKERHUB_USERNAME}/payment-service", path: 'backend/payment-service'],
-                        [name: 'chat-service', image: "${DOCKERHUB_USERNAME}/chat-service", path: 'backend/chat-service'],
+                        // chat-service removed
                         [name: 'frontend', image: "${DOCKERHUB_USERNAME}/ecommerce-frontend", path: 'frontend']
                     ]
 
@@ -71,7 +71,7 @@ pipeline {
                         'product-service'       : 'product-service.yml',
                         'order-service'         : 'order-service.yml',
                         'payment-service'       : 'payment-service.yml',
-                        'chat-service'          : 'chat-service.yml',
+                        // chat-service removed
                         'frontend'              : 'frontend.yml'
                     ]
 

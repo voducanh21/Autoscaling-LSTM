@@ -10,7 +10,7 @@ A comprehensive e-commerce application built with microservices architecture usi
 - **Product Service**: Manages products, categories, and inventory
 - **Order Service**: Processes orders and manages shopping cart functionality
 - **Payment Service**: Handles payment processing and transactions
-- **Chat Service**: Provides customer support chat functionality
+<!-- Chat service removed from this repository -->
 
 ### Frontend
 - **Angular**: Single Page Application with Material Design components
@@ -19,7 +19,7 @@ A comprehensive e-commerce application built with microservices architecture usi
 ### Databases
 - **MySQL**: Used by Authentication Service and Payment Service
 - **PostgreSQL**: Used by Product Service for product data
-- **MongoDB**: Used by Order Service and Chat Service
+- **MongoDB**: Used by Order Service
 
 ## 🚀 Getting Started
 
@@ -82,11 +82,7 @@ cd backend/payment-service
 ```
 
 #### Chat Service
-```bash
-cd backend/chat-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
+This project no longer includes a chat service.
 
 ### 3. Running Frontend
 
@@ -188,7 +184,7 @@ After running the services, API documentation is available at:
 - Product Service: `http://localhost:8082/swagger-ui.html`
 - Order Service: `http://localhost:8083/swagger-ui.html`
 - Payment Service: `http://localhost:8084/swagger-ui.html`
-- Chat Service: `http://localhost:8085/swagger-ui.html`
+<!-- Chat Service API documentation removed -->
 
 ## 🗂️ Project Structure
 
@@ -200,7 +196,7 @@ E-commerce_Web/
 │   ├── product-service/      # Product management
 │   ├── order-service/        # Order processing
 │   ├── payment-service/      # Payment processing
-│   ├── chat-service/         # Customer support chat
+│   ├── (chat-service removed)
 │   ├── docker/              # Database initialization scripts
 │   ├── k8s/                 # Kubernetes deployment files
 │   └── docker-compose.yml   # Docker services configuration
