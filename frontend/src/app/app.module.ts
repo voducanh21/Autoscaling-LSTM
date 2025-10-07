@@ -35,7 +35,6 @@ import { StoreService } from './services/store.service';
 import { HTTP_INTERCEPTORS, HttpClientModule } from '@angular/common/http';
 import { NotFoundModule } from './components/not-found/not-found.module';
 import { TokenInterceptor } from './services/interceptors/token.interceptor';
-import { ChatComponent } from './pages/chat/chat.component';
 
 import { FormsModule } from '@angular/forms';
 
@@ -49,7 +48,6 @@ import { FormsModule } from '@angular/forms';
     ProductsBoxComponent,
     CartComponent,
     FooterComponent,
-    ChatComponent,
   ],
   imports: [
     BrowserModule,

@@ -56,11 +56,6 @@ spec:
                 configMapKeyRef:
                   name: common-config
                   key: AUTHENTICATION_SERVICE_URL
-            - name: CHAT_SERVICE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: common-config
-                  key: CHAT_SERVICE_URL
 ---
 apiVersion: v1
 kind: Service

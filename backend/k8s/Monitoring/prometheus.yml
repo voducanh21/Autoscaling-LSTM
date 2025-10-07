@@ -46,11 +46,7 @@ data:
         static_configs:
           - targets: ['authentication-service.apps.svc.cluster.local:8084']
 
-      # Chat Service
-      - job_name: 'chat-service'
-        metrics_path: '/actuator/prometheus'
-        static_configs:
-          - targets: ['chat-service.apps.svc.cluster.local:8085']
+      # Chat Service removed from monitoring (service removed)
 ---
 apiVersion: apps/v1
 kind: Deployment
