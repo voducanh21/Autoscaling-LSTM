@@ -24,7 +24,7 @@ default_args = {
 with DAG(
         dag_id='test_logs_dag',
         default_args=default_args,
-        schedule=None,             # ✅ dùng schedule thay vì schedule_interval
+        schedule=None,            # Airflow 3.x dùng schedule, không còn schedule_interval
         start_date=datetime(2025, 1, 1),
         catchup=False,
         tags=['debug', 'logging'],
@@ -33,7 +33,6 @@ with DAG(
     test_log = PythonOperator(
         task_id='check_logs',
         python_callable=test_log_function,
-        provide_context=True,
     )
 
     test_log
