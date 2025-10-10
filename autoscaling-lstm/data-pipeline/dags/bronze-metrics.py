@@ -36,7 +36,7 @@ with DAG(
     bronze = KubernetesPodOperator(
         task_id="bronze_metrics",
         name="bronze-metrics",
-        namespace="ops",
+        namespace="airflow",
         image="python:3.11-slim",
         image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
@@ -48,7 +48,7 @@ with DAG(
             "PROM_URL": "http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",
             "S3_BUCKET": "datalake",
             "S3_PREFIX": "bronze/metrics",
-            "S3_ENDPOINT": "http://minio.infra.svc.cluster.local:9000",
+            "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[

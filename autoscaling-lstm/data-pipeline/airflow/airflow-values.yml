@@ -1,5 +1,5 @@
 ##########################################
-# Airflow on Minikube - Chart 1.18.0 + Airflow 3.1.0
+# Airflow on Minikube - Chart 1.18.0 + Airflow 3.1.0 (Fixed Log Permission)
 ##########################################
 
 executor: KubernetesExecutor
@@ -45,9 +45,15 @@ config:
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: { value: "false" }
   AIRFLOW__LOGGING__REMOTE_LOGGING: { value: "False" }
 
-  # --- FIX 1: Cấu hình đúng log server cho KubernetesExecutor ---
+  # --- FIX 1: cấu hình log server cho KubernetesExecutor ---
   AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_PORT: { value: "8793" }
-  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS: { value: "0.0.0.0" }
+  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS: { value: "airflow-api-server" }
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: { value: "apache/airflow" }
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: { value: "3.1.0" }
+  AIRFLOW__LOGGING__BASE_LOG_FOLDER: { value: "/opt/airflow/logs" }
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: { value: "/opt/airflow/logs" }
+  AIRFLOW__KUBERNETES__DELETE_WORKER_PODS: { value: "False" }
+  AIRFLOW__KUBERNETES__POD_TEMPLATE_FILE: { value: "/opt/airflow/pod_templates/pod_template.yaml" }
 
 webserver:
   replicas: 1
@@ -91,7 +97,7 @@ dagProcessor:
   enabled: true
   replicas: 1
   securityContext:
-    runAsUser: 0               # ⚠️ FIX: chạy bằng root để có quyền ghi log
+    runAsUser: 0         # ⚠️ chạy bằng root để ghi logs
   extraVolumeMounts:
     - name: logs
       mountPath: /opt/airflow/logs
@@ -112,18 +118,50 @@ dags:
     subPath: autoscaling-lstm/data-pipeline/dags
     credentialsSecret: airflow-git-secret
 
-# --- FIX 2: PVC logs ---
+# --- PVC logs ---
 logs:
   persistence:
     enabled: true
     size: 1Gi
     storageClassName: standard
 
-# --- FIX 3: Tự động cấp quyền ghi logs ---
+# --- cấp quyền ghi logs ---
 volumePermissions:
   enabled: true
   securityContext:
     runAsUser: 0
+
+# --- Pod template cho worker pod ---
+kubernetesPodTemplate:
+  enabled: true
+  template: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: airflow-worker-template
+      labels:
+        component: worker
+    spec:
+      restartPolicy: Never
+      securityContext: {}
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+      containers:
+        - name: base
+          image: apache/airflow:3.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+          env:
+            - name: AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS
+              value: airflow-api-server
+            - name: AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_PORT
+              value: "8793"
 
 statsd:
   enabled: true

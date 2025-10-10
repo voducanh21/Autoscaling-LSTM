@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pipeline-scripts
-  namespace: ops
+  namespace: airflow
 data:
   metrics_dumper.py: |
     # 🥉 Bronze Layer

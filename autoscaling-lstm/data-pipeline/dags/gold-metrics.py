@@ -47,7 +47,7 @@ with DAG(
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "GOLD_PREFIX": "gold/metrics",
-            "S3_ENDPOINT": "http://minio.infra.svc.cluster.local:9000",
+            "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
