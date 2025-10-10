@@ -19,6 +19,7 @@ with DAG(
         tags=["silver", "metrics"],
 ) as dag:
 
+    # Mount scripts từ ConfigMap
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
         config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
@@ -32,10 +33,16 @@ with DAG(
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
+    # ✅ Giống bronze: chạy với quyền root để tránh lỗi ghi logs
+    security_ctx = k8s.V1SecurityContext(
+        run_as_user=0,
+        run_as_group=0
+    )
+
     silver = KubernetesPodOperator(
         task_id="silver_metrics",
         name="silver-metrics",
-        namespace="ops",
+        namespace="airflow",   # ✅ chạy trong namespace airflow
         image="python:3.11-slim",
         image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
@@ -51,14 +58,19 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+            k8s.V1EnvFromSource(
+                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
+            )
         ],
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
         container_resources=pod_resources,
+        security_context=security_ctx,    # ✅ thêm dòng này
         get_logs=True,
         is_delete_operator_pod=False,
-        service_account_name="airflow-runner",
+        in_cluster=True,
+        config_file=None,
+        # ❌ bỏ service_account_name để dùng SA mặc định của airflow-scheduler
     )
 
     silver
