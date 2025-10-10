@@ -36,7 +36,8 @@ with DAG(
     # ✅ Giống bronze: chạy với quyền root để tránh lỗi ghi logs
     security_ctx = k8s.V1SecurityContext(
         run_as_user=0,
-        run_as_group=0
+        run_as_group=0,
+        allow_privilege_escalation=True,
     )
 
     silver = KubernetesPodOperator(
