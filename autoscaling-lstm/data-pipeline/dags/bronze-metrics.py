@@ -71,7 +71,6 @@ with DAG(
         is_delete_operator_pod=False,
         in_cluster=True,
         config_file=None,
-        service_account_name="airflow-runner",
     )
 
     bronze
