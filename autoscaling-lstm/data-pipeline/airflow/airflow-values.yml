@@ -1,114 +1,133 @@
-# Sử dụng CeleryExecutor để cho phép chạy tác vụ phân tán trên nhiều worker
-executor: CeleryExecutor
+##########################################
+# Airflow on Minikube - Chart 1.18.0 + Airflow 3.1.0
+##########################################
 
-# Cấu hình cơ sở dữ liệu metadata (Postgres nội bộ)
+executor: KubernetesExecutor
+
+global:
+  postgresql:
+    auth:
+      username: airflow
+      password: airflowpass
+      database: airflowdb
+
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "3.1.0"
+    pullPolicy: IfNotPresent
+
 postgresql:
+  enabled: true
+  fullnameOverride: airflow-postgresql
   auth:
     username: airflow
-    password: "airflow"
-    database: airflow
-    postgresPassword: "postgres"
+    password: airflowpass
+    database: airflowdb
+    postgresPassword: postgrespass
   primary:
     persistence:
       enabled: true
-      size: 1Gi
-    podSecurityContext:
-      fsGroup: 1001
-      fsGroupChangePolicy: Always
-    containerSecurityContext:
-      runAsUser: 1001
-  volumePermissions:
-    enabled: true
-    securityContext:
-      runAsUser: 0
+      size: 8Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
 
-# Redis cho Celery
-redis:
-  enabled: true
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
+config:
+  AIRFLOW__CORE__EXECUTOR: { value: "KubernetesExecutor" }
+  AIRFLOW__CORE__FERNET_KEY: { value: "Bgeplke0MexxR7d9zAi6ELOwxEzgd2gHfXSKcEh3TsE=" }
+  AIRFLOW__CORE__DEFAULT_TIMEZONE: { value: "Asia/Ho_Chi_Minh" }
+  AIRFLOW__CORE__LOAD_EXAMPLES: { value: "false" }
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: { value: "false" }
+  AIRFLOW__LOGGING__REMOTE_LOGGING: { value: "False" }
 
-# Webserver (Airflow UI)
+  # --- FIX 1: Cấu hình đúng log server cho KubernetesExecutor ---
+  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_PORT: { value: "8793" }
+  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS: { value: "0.0.0.0" }
+
 webserver:
-  service:
-    type: NodePort
-    ports:
-      - name: airflow-ui
-        port: 8080
-        targetPort: 8080
-  resources:
-    requests:
-      cpu: 200m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
-
-# Scheduler
-scheduler:
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 300m
-      memory: 512Mi
-
-# Workers (Celery)
-workers:
   replicas: 1
-  persistence:
+  defaultUser:
     enabled: true
-    size: 1Gi
-    fixPermissions: false       # Hỗ trợ chown PVC logs
-  resources:
-    requests:
-      cpu: 200m
-      memory: 256Mi
-    limits:
-      cpu: 400m
-      memory: 768Mi            # tăng tránh OOM
+    username: admin
+    password: admin
+    email: admin@example.com
+    role: Admin
+  extraVolumeMounts:
+    - name: logs
+      mountPath: /opt/airflow/logs
+  extraVolumes:
+    - name: logs
+      persistentVolumeClaim:
+        claimName: airflow-logs
 
-# Triggerer
+scheduler:
+  replicas: 1
+  securityContext:
+    runAsUser: 50000
+  extraVolumeMounts:
+    - name: logs
+      mountPath: /opt/airflow/logs
+  extraVolumes:
+    - name: logs
+      persistentVolumeClaim:
+        claimName: airflow-logs
+
 triggerer:
   replicas: 1
+  extraVolumeMounts:
+    - name: logs
+      mountPath: /opt/airflow/logs
+  extraVolumes:
+    - name: logs
+      persistentVolumeClaim:
+        claimName: airflow-logs
+
+dagProcessor:
+  enabled: true
+  replicas: 1
+  securityContext:
+    runAsUser: 0               # ⚠️ FIX: chạy bằng root để có quyền ghi log
+  extraVolumeMounts:
+    - name: logs
+      mountPath: /opt/airflow/logs
+  extraVolumes:
+    - name: logs
+      persistentVolumeClaim:
+        claimName: airflow-logs
+
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: true
+    repo: https://github.com/voducanh21/Autoscaling-LSTM.git
+    branch: main
+    rev: HEAD
+    depth: 1
+    subPath: autoscaling-lstm/data-pipeline/dags
+    credentialsSecret: airflow-git-secret
+
+# --- FIX 2: PVC logs ---
+logs:
   persistence:
     enabled: true
     size: 1Gi
-    fixPermissions: false
-  resources:
-    requests:
-      cpu: 50m
-      memory: 256Mi            # tăng request
-    limits:
-      cpu: 200m
-      memory: 768Mi            # tăng limit
-  livenessProbe:
-    timeoutSeconds: 60
-    periodSeconds: 60
-    failureThreshold: 10
-  env:
-    - name: AIRFLOW__TRIGGERER__DEFAULT_CAPACITY
-      value: "1"
+    storageClassName: standard
 
-# Tắt Flower
-flower:
-  enabled: false
+# --- FIX 3: Tự động cấp quyền ghi logs ---
+volumePermissions:
+  enabled: true
+  securityContext:
+    runAsUser: 0
 
-# StatsD (Prometheus scrape)
 statsd:
   enabled: true
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 100m
-      memory: 256Mi
 
-# Không cần logs persistence chung
-logs:
-  persistence:
-    enabled: false
+serviceAccount:
+  create: true
+  name: airflow
