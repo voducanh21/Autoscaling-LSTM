@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from kubernetes import client as k8s
 
 default_args = {
     "owner": "autoscaling",
@@ -18,7 +17,10 @@ with DAG(
         default_args=default_args,
         tags=["silver", "metrics"],
 ) as dag:
+    # 👉 Import k8s *bên trong DAG* để tránh timeout khi parse (Airflow 3.1.0)
+    from kubernetes import client as k8s
 
+    # --- Mount ConfigMap chứa script ---
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
         config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
@@ -27,12 +29,24 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
+    # --- Mount PVC logs để đồng bộ quyền ---
+    volume_logs = k8s.V1Volume(
+        name="logs",
+        persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+            claim_name="airflow-logs"
+        ),
+    )
+    mount_logs = k8s.V1VolumeMount(
+        name="logs", mount_path="/opt/airflow/logs"
+    )
+
+    # --- Resource ---
     pod_resources = k8s.V1ResourceRequirements(
         requests={"cpu": "100m", "memory": "128Mi"},
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
-    # ✅ chạy với quyền root để tránh lỗi ghi logs
+    # --- Chạy bằng root để ghi log ---
     security_ctx = k8s.V1SecurityContext(
         run_as_user=0,
         run_as_group=0,
@@ -47,6 +61,7 @@ with DAG(
         image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
         arguments=[
+            # Cài đủ package cần đọc ghi parquet
             "pip install -q pandas pyarrow fsspec s3fs tzdata && "
             "python /app/silver_builder.py"
         ],
@@ -58,14 +73,12 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(
-                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
-            )
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts],
-        volume_mounts=[mount_scripts],
+        volumes=[volume_scripts, volume_logs],       # ✅ mount thêm PVC logs
+        volume_mounts=[mount_scripts, mount_logs],   # ✅ mount logs path
         container_resources=pod_resources,
-        container_security_context=security_ctx,   # ✅ ĐÚNG key
+        security_context=security_ctx,               # ✅ dùng đúng key cho 3.1.0
         get_logs=True,
         is_delete_operator_pod=False,
         in_cluster=True,
