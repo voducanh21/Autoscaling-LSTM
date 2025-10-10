@@ -33,6 +33,13 @@ with DAG(
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
+    # ✅ Thêm security_context để container chạy bằng user có quyền ghi logs
+    security_ctx = k8s.V1SecurityContext(
+        run_as_user=0,              # chạy bằng root user → tránh lỗi Permission denied
+        run_as_group=0,
+        allow_privilege_escalation=True
+    )
+
     bronze = KubernetesPodOperator(
         task_id="bronze_metrics",
         name="bronze-metrics",
@@ -59,8 +66,8 @@ with DAG(
         volumes=[volume_scripts],
         volume_mounts=[mount_scripts],
         container_resources=pod_resources,
+        security_context=security_ctx,   # 👈 Thêm dòng này
         get_logs=True,
-        # 🔧 các flag quan trọng để giữ pod và hiển thị log
         is_delete_operator_pod=False,
         in_cluster=True,
         config_file=None,
