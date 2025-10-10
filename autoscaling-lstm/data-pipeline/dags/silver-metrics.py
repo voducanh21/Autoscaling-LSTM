@@ -17,7 +17,7 @@ with DAG(
         default_args=default_args,
         tags=["silver", "metrics"],
 ) as dag:
-    # 👉 Import k8s *bên trong DAG* để tránh timeout khi parse (Airflow 3.1.0)
+    # ⚙️ Import k8s bên trong DAG để tránh timeout khi parse (Airflow 3.1.0)
     from kubernetes import client as k8s
 
     # --- Mount ConfigMap chứa script ---
@@ -36,9 +36,7 @@ with DAG(
             claim_name="airflow-logs"
         ),
     )
-    mount_logs = k8s.V1VolumeMount(
-        name="logs", mount_path="/opt/airflow/logs"
-    )
+    mount_logs = k8s.V1VolumeMount(name="logs", mount_path="/opt/airflow/logs")
 
     # --- Resource ---
     pod_resources = k8s.V1ResourceRequirements(
@@ -53,6 +51,7 @@ with DAG(
         allow_privilege_escalation=True,
     )
 
+    # --- Task chính ---
     silver = KubernetesPodOperator(
         task_id="silver_metrics",
         name="silver-metrics",
@@ -61,9 +60,12 @@ with DAG(
         image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
         arguments=[
-            # Cài đủ package cần đọc ghi parquet
+            # Cài đủ package + in log debug
+            "echo '[INFO] Installing dependencies...' && "
             "pip install -q pandas pyarrow fsspec s3fs tzdata && "
-            "python /app/silver_builder.py"
+            "echo '[INFO] Starting silver_builder.py' && "
+            "python /app/silver_builder.py && "
+            "echo '[INFO] Finished silver_builder.py'"
         ],
         env_vars={
             "S3_BUCKET": "datalake",
@@ -75,14 +77,17 @@ with DAG(
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts, volume_logs],       # ✅ mount thêm PVC logs
-        volume_mounts=[mount_scripts, mount_logs],   # ✅ mount logs path
+        volumes=[volume_scripts, volume_logs],
+        volume_mounts=[mount_scripts, mount_logs],
         container_resources=pod_resources,
-        security_context=security_ctx,               # ✅ dùng đúng key cho 3.1.0
+        security_context=security_ctx,
         get_logs=True,
-        is_delete_operator_pod=False,
+        is_delete_operator_pod=False,  # ❗ Giữ pod lại sau khi chạy
         in_cluster=True,
         config_file=None,
+        # 🔥 Giữ pod cả khi lỗi để xem log dễ hơn
+        do_xcom_push=False,
+        log_events_on_failure=True,
     )
 
     silver
