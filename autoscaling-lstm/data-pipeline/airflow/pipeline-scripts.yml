@@ -79,7 +79,6 @@ data:
             rows = [collect(svc) for svc in sorted(jobs)]
             df = pd.DataFrame(rows)
 
-            # 🔧 ép kiểu schema cố định
             df["service"] = df["service"].astype(str)
             df["ts"] = pd.to_datetime(df["ts"]).astype(str)
             df = df.astype({
@@ -110,7 +109,6 @@ data:
     # 🥈 Silver Layer
     import os, sys
     import pandas as pd
-    import pyarrow.parquet as pq
     import s3fs
 
     BUCKET      = os.getenv("S3_BUCKET", "datalake")
@@ -124,22 +122,43 @@ data:
         try:
             files = fs.glob(f"{BUCKET}/{BRONZE_PATH}/**/*.parquet")
             if not files:
-                print("[WARN] no bronze data found"); return
+                print("[WARN] no bronze data found")
+                return
 
-            dfs = [
-                pd.read_parquet(
-                    f"s3://{f}",
-                    storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
-                ) for f in files
-            ]
+            dfs = []
+            for f in files:
+                try:
+                    d = pd.read_parquet(
+                        f"s3://{f}",
+                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+                    )
+                    # 🔧 Ép schema đồng nhất để tránh lỗi merge
+                    if "service" in d.columns:
+                        d["service"] = d["service"].astype(str)
+                    if "ts" in d.columns:
+                        d["ts"] = pd.to_datetime(d["ts"], errors="coerce").astype(str)
+
+                    for col in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
+                        if col in d.columns:
+                            d[col] = pd.to_numeric(d[col], errors="coerce")
+
+                    dfs.append(d)
+                except Exception as e:
+                    print(f"[WARN] skip {f} ({e})", file=sys.stderr)
+
+            if not dfs:
+                print("[WARN] no valid parquet files")
+                return
 
             df = pd.concat(dfs, ignore_index=True)
-            df["service"] = df["service"].astype(str)  # 🔧 ép kiểu service
-            df["ts"] = pd.to_datetime(df["ts"], errors="coerce").astype(str)
             df = df.dropna(subset=["service", "ts"]).sort_values("ts")
 
             out_path = f"s3://{BUCKET}/{SILVER_PATH}/silver-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
-            df.to_parquet(out_path, index=False, storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}})
+            df.to_parquet(
+                out_path,
+                index=False,
+                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+            )
             print(f"[OK] wrote {out_path}")
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
@@ -167,15 +186,24 @@ data:
             if not files:
                 print("[WARN] no silver data found"); return
 
-            dfs = [
-                pd.read_parquet(
-                    f"s3://{f}",
-                    storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
-                ) for f in files
-            ]
-            df = pd.concat(dfs, ignore_index=True)
-            df["service"] = df["service"].astype(str)  # 🔧 giữ schema thống nhất
+            dfs = []
+            for f in files:
+                try:
+                    d = pd.read_parquet(
+                        f"s3://{f}",
+                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+                    )
+                    if "service" in d.columns:
+                        d["service"] = d["service"].astype(str)
+                    dfs.append(d)
+                except Exception as e:
+                    print(f"[WARN] skip {f} ({e})", file=sys.stderr)
 
+            if not dfs:
+                print("[WARN] no valid silver files")
+                return
+
+            df = pd.concat(dfs, ignore_index=True)
             agg = (
                 df.groupby(["service", "hour", "dow"], dropna=True)
                 .agg({
@@ -188,7 +216,11 @@ data:
             )
 
             out_path = f"s3://{BUCKET}/{GOLD_PATH}/gold-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
-            agg.to_parquet(out_path, index=False, storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}})
+            agg.to_parquet(
+                out_path,
+                index=False,
+                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+            )
             print(f"[OK] wrote {out_path}")
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
