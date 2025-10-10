@@ -61,7 +61,7 @@ data:
         now = datetime.now(TZ)
         return {
             "ts": now.isoformat(),
-            "service": service,
+            "service": str(service),
             "rps_1m": rps,
             "latency_p95_ms": p95_ms,
             "cpu_cores_1m": cpu,
@@ -78,6 +78,18 @@ data:
 
             rows = [collect(svc) for svc in sorted(jobs)]
             df = pd.DataFrame(rows)
+
+            # 🔧 ép kiểu schema cố định
+            df["service"] = df["service"].astype(str)
+            df["ts"] = pd.to_datetime(df["ts"]).astype(str)
+            df = df.astype({
+                "rps_1m": "float64",
+                "latency_p95_ms": "float64",
+                "cpu_cores_1m": "float64",
+                "mem_bytes": "float64",
+                "hour": "int64",
+                "dow": "int64",
+            })
 
             now = datetime.now(TZ)
             date = now.strftime("%Y-%m-%d")
@@ -114,9 +126,17 @@ data:
             if not files:
                 print("[WARN] no bronze data found"); return
 
-            dfs = [pd.read_parquet(f"s3://{f}", storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}) for f in files]
-            df = pd.concat(dfs)
-            df = df.dropna().sort_values("ts")
+            dfs = [
+                pd.read_parquet(
+                    f"s3://{f}",
+                    storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+                ) for f in files
+            ]
+
+            df = pd.concat(dfs, ignore_index=True)
+            df["service"] = df["service"].astype(str)  # 🔧 ép kiểu service
+            df["ts"] = pd.to_datetime(df["ts"], errors="coerce").astype(str)
+            df = df.dropna(subset=["service", "ts"]).sort_values("ts")
 
             out_path = f"s3://{BUCKET}/{SILVER_PATH}/silver-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
             df.to_parquet(out_path, index=False, storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}})
@@ -147,12 +167,23 @@ data:
             if not files:
                 print("[WARN] no silver data found"); return
 
-            dfs = [pd.read_parquet(f"s3://{f}", storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}) for f in files]
-            df = pd.concat(dfs)
+            dfs = [
+                pd.read_parquet(
+                    f"s3://{f}",
+                    storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+                ) for f in files
+            ]
+            df = pd.concat(dfs, ignore_index=True)
+            df["service"] = df["service"].astype(str)  # 🔧 giữ schema thống nhất
 
             agg = (
-                df.groupby(["service", "hour", "dow"])
-                .agg({"rps_1m": "mean", "latency_p95_ms": "mean", "cpu_cores_1m": "mean", "mem_bytes": "mean"})
+                df.groupby(["service", "hour", "dow"], dropna=True)
+                .agg({
+                    "rps_1m": "mean",
+                    "latency_p95_ms": "mean",
+                    "cpu_cores_1m": "mean",
+                    "mem_bytes": "mean"
+                })
                 .reset_index()
             )
 

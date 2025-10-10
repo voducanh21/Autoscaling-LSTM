@@ -40,6 +40,7 @@ postgresql:
 config:
   AIRFLOW__CORE__EXECUTOR: { value: "KubernetesExecutor" }
   AIRFLOW__CORE__FERNET_KEY: { value: "Bgeplke0MexxR7d9zAi6ELOwxEzgd2gHfXSKcEh3TsE=" }
+  AIRFLOW__API_AUTH__JWT_SECRET: { value: "my-fixed-jwt-secret-1234567890" }
   AIRFLOW__CORE__DEFAULT_TIMEZONE: { value: "Asia/Ho_Chi_Minh" }
   AIRFLOW__CORE__LOAD_EXAMPLES: { value: "false" }
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: { value: "false" }
@@ -82,6 +83,21 @@ scheduler:
     - name: logs
       persistentVolumeClaim:
         claimName: airflow-logs
+
+  # ✅ FIX 2: tự động cấp quyền ghi logs trước khi scheduler khởi động
+  extraInitContainers:
+    - name: fix-log-permission
+      image: busybox
+      command:
+        - sh
+        - -c
+        - |
+          echo "Fixing permissions for /opt/airflow/logs..."
+          chown -R 50000:50000 /opt/airflow/logs || true
+          chmod -R 777 /opt/airflow/logs || true
+      volumeMounts:
+        - name: logs
+          mountPath: /opt/airflow/logs
 
 triggerer:
   replicas: 1
@@ -154,6 +170,8 @@ kubernetesPodTemplate:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: true
           volumeMounts:
             - name: logs
               mountPath: /opt/airflow/logs

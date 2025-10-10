@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from kubernetes import client as k8s
 
 default_args = {
     "owner": "autoscaling",
@@ -18,6 +17,8 @@ with DAG(
         default_args=default_args,
         tags=["bronze", "metrics"],
 ) as dag:
+    # 👉 import kubernetes client *bên trong* để tránh delay khi parse
+    from kubernetes import client as k8s
 
     # Mount scripts từ ConfigMap chứa metrics_dumper.py
     volume_scripts = k8s.V1Volume(
@@ -28,16 +29,23 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
+    volume_logs = k8s.V1Volume(
+        name="logs",
+        persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+            claim_name="airflow-logs"
+        ),
+    )
+    mount_logs = k8s.V1VolumeMount(name="logs", mount_path="/opt/airflow/logs")
+
     pod_resources = k8s.V1ResourceRequirements(
         requests={"cpu": "100m", "memory": "128Mi"},
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
-    # ✅ Thêm security_context để container chạy bằng user có quyền ghi logs
     security_ctx = k8s.V1SecurityContext(
-        run_as_user=0,              # chạy bằng root user → tránh lỗi Permission denied
+        run_as_user=0,
         run_as_group=0,
-        allow_privilege_escalation=True
+        allow_privilege_escalation=True,
     )
 
     bronze = KubernetesPodOperator(
@@ -59,14 +67,12 @@ with DAG(
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
         env_from=[
-            k8s.V1EnvFromSource(
-                secret_ref=k8s.V1SecretEnvSource(name="minio-cred")
-            )
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts],
-        volume_mounts=[mount_scripts],
+        volumes=[volume_scripts, volume_logs],
+        volume_mounts=[mount_scripts, mount_logs],
         container_resources=pod_resources,
-        security_context=security_ctx,   # 👈 Thêm dòng này
+        security_context=security_ctx,
         get_logs=True,
         is_delete_operator_pod=False,
         in_cluster=True,
