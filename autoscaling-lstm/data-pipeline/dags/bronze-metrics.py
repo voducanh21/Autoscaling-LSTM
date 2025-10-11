@@ -29,13 +29,6 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
-    volume_logs = k8s.V1Volume(
-        name="logs",
-        persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
-            claim_name="airflow-logs"
-        ),
-    )
-    mount_logs = k8s.V1VolumeMount(name="logs", mount_path="/opt/airflow/logs")
 
     pod_resources = k8s.V1ResourceRequirements(
         requests={"cpu": "100m", "memory": "128Mi"},
@@ -69,8 +62,8 @@ with DAG(
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts, volume_logs],
-        volume_mounts=[mount_scripts, mount_logs],
+        volumes=[volume_scripts],
+        volume_mounts=[mount_scripts],
         container_resources=pod_resources,
         security_context=security_ctx,
         get_logs=True,
