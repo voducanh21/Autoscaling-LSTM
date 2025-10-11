@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 
+
 default_args = {
     "owner": "autoscaling",
     "retries": 1,
@@ -17,10 +18,9 @@ with DAG(
         default_args=default_args,
         tags=["bronze", "metrics"],
 ) as dag:
-    # 👉 import kubernetes client *bên trong* để tránh delay khi parse
     from kubernetes import client as k8s
 
-    # Mount scripts từ ConfigMap chứa metrics_dumper.py
+    # Mount ConfigMap chứa metrics_dumper.py
     volume_scripts = k8s.V1Volume(
         name="pipeline-scripts",
         config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
@@ -29,16 +29,25 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
+    # Mount PVC log (đã được fix quyền ghi trong values.yaml)
+    volume_logs = k8s.V1Volume(
+        name="logs",
+        persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+            claim_name="airflow-logs"
+        ),
+    )
+    mount_logs = k8s.V1VolumeMount(name="logs", mount_path="/opt/airflow/logs")
 
     pod_resources = k8s.V1ResourceRequirements(
         requests={"cpu": "100m", "memory": "128Mi"},
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
+    # worker chạy bằng root (theo pod_template.yaml)
     security_ctx = k8s.V1SecurityContext(
-        run_as_user=50000,
-        run_as_group=50000,
-        allow_privilege_escalation=False,
+        run_as_user=0,
+        run_as_group=0,
+        allow_privilege_escalation=True,
     )
 
     bronze = KubernetesPodOperator(
@@ -53,6 +62,7 @@ with DAG(
             "python /app/metrics_dumper.py"
         ],
         env_vars={
+            # cấu hình metrics
             "PROM_URL": "http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",
             "S3_BUCKET": "datalake",
             "S3_PREFIX": "bronze/metrics",
@@ -62,8 +72,8 @@ with DAG(
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts],
-        volume_mounts=[mount_scripts],
+        volumes=[volume_scripts, volume_logs],
+        volume_mounts=[mount_scripts, mount_logs],
         container_resources=pod_resources,
         security_context=security_ctx,
         get_logs=True,

@@ -44,15 +44,17 @@ config:
   AIRFLOW__CORE__DEFAULT_TIMEZONE: { value: "Asia/Ho_Chi_Minh" }
   AIRFLOW__CORE__LOAD_EXAMPLES: { value: "false" }
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: { value: "false" }
-  AIRFLOW__LOGGING__REMOTE_LOGGING: { value: "False" }
 
-  # --- FIX 1: cấu hình log server cho KubernetesExecutor ---
-  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_PORT: { value: "8793" }
-  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS: { value: "airflow-api-server" }
-  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: { value: "apache/airflow" }
-  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: { value: "3.1.0" }
+  # --- Logging config ---
+  AIRFLOW__LOGGING__REMOTE_LOGGING: { value: "False" }
   AIRFLOW__LOGGING__BASE_LOG_FOLDER: { value: "/opt/airflow/logs" }
   AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: { value: "/opt/airflow/logs" }
+
+  # --- Kubernetes executor settings ---
+  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_ADDRESS: { value: "airflow-api-server" }
+  AIRFLOW__KUBERNETES__WORKER_LOG_SERVER_PORT: { value: "8793" }
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: { value: "apache/airflow" }
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: { value: "3.1.0" }
   AIRFLOW__KUBERNETES__DELETE_WORKER_PODS: { value: "False" }
   AIRFLOW__KUBERNETES__POD_TEMPLATE_FILE: { value: "/opt/airflow/pod_templates/pod_template.yaml" }
 
@@ -84,7 +86,7 @@ scheduler:
       persistentVolumeClaim:
         claimName: airflow-logs
 
-  # ✅ FIX 2: tự động cấp quyền ghi logs trước khi scheduler khởi động
+  # ✅ FIX 1: initContainer tự cấp quyền ghi log trước khi scheduler chạy
   extraInitContainers:
     - name: fix-log-permission
       image: busybox
@@ -113,7 +115,7 @@ dagProcessor:
   enabled: true
   replicas: 1
   securityContext:
-    runAsUser: 0         # ⚠️ chạy bằng root để ghi logs
+    runAsUser: 0       # ⚠ chạy bằng root để ghi logs
   extraVolumeMounts:
     - name: logs
       mountPath: /opt/airflow/logs
@@ -141,13 +143,13 @@ logs:
     size: 1Gi
     storageClassName: standard
 
-# --- cấp quyền ghi logs ---
+# --- FIX 2: cho phép initContainer chỉnh quyền ---
 volumePermissions:
   enabled: true
   securityContext:
     runAsUser: 0
 
-# --- Pod template cho worker pod ---
+# --- Worker Pod Template (root user + ghi được log) ---
 kubernetesPodTemplate:
   enabled: true
   template: |
