@@ -48,7 +48,7 @@ with DAG(
     security_ctx = k8s.V1SecurityContext(
         run_as_user=50000,
         run_as_group=50000,
-        allow_privilege_escalation=True,
+        allow_privilege_escalation=False,
     )
 
     # KubernetesPodOperator chạy script Silver
