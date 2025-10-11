@@ -96,7 +96,14 @@ data:
 
             for svc, sub in df.groupby("service"):
                 path = f"s3://{BUCKET}/{PREFIX}/date={date}/service={svc}/part-{part}.parquet"
-                sub.to_parquet(path, index=False, storage_options=storage_opts)
+                sub.to_parquet(
+                    path,
+                    index=False,
+                    engine="pyarrow",
+                    storage_options=storage_opts,
+                    use_dictionary=False
+                )
+  
                 print(f"[OK] wrote {path} (tz={TZ_NAME})")
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
@@ -106,7 +113,7 @@ data:
         main()
 
   silver_builder.py: |
-    # 🥈 Silver Layer
+    # 🥈 Silver Layer (fixed version - handle dictionary encoding)
     import os, sys
     import pandas as pd
     import s3fs
@@ -128,11 +135,15 @@ data:
             dfs = []
             for f in files:
                 try:
+                    # ✅ Giải nén dictionary encoding và ép kiểu thống nhất
                     d = pd.read_parquet(
                         f"s3://{f}",
-                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
-                    )
-                    # 🔧 Ép schema đồng nhất để tránh lỗi merge
+                        engine="pyarrow",
+                        use_nullable_dtypes=True,
+                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}},
+                    ).copy()
+
+                    # Chuẩn hoá schema
                     if "service" in d.columns:
                         d["service"] = d["service"].astype(str)
                     if "ts" in d.columns:
@@ -157,7 +168,8 @@ data:
             df.to_parquet(
                 out_path,
                 index=False,
-                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
+                engine="pyarrow",
+                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}},
             )
             print(f"[OK] wrote {out_path}")
         except Exception as e:
@@ -166,6 +178,7 @@ data:
 
     if __name__ == "__main__":
         main()
+
 
   gold_aggregator.py: |
     # 🥇 Gold Layer
