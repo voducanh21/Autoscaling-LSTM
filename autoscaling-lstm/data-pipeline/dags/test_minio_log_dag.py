@@ -14,9 +14,9 @@ def test_log():
     logging.info("=== TEST REMOTE LOGGING DONE ===")
 
 with DAG(
-        dag_id="test_remote_logging_dag",
+        dag_id="test_minio_log_dag",
         start_date=datetime(2025, 10, 12),
-        schedule_interval=None,
+        schedule=None,
         catchup=False,
         tags=["test", "logging"],
 ) as dag:
