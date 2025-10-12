@@ -29,21 +29,11 @@ with DAG(
         name="pipeline-scripts", mount_path="/app", read_only=True
     )
 
-    # Mount PVC log (đã được fix quyền ghi trong values.yaml)
-    volume_logs = k8s.V1Volume(
-        name="logs",
-        persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
-            claim_name="airflow-logs"
-        ),
-    )
-    mount_logs = k8s.V1VolumeMount(name="logs", mount_path="/opt/airflow/logs")
-
     pod_resources = k8s.V1ResourceRequirements(
         requests={"cpu": "100m", "memory": "128Mi"},
         limits={"cpu": "500m", "memory": "512Mi"},
     )
 
-    # worker chạy bằng root (theo pod_template.yaml)
     security_ctx = k8s.V1SecurityContext(
         run_as_user=0,
         run_as_group=0,
@@ -62,22 +52,27 @@ with DAG(
             "python /app/metrics_dumper.py"
         ],
         env_vars={
-            # cấu hình metrics
+            # Prometheus endpoint
             "PROM_URL": "http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",
+            # MinIO (S3)
             "S3_BUCKET": "datalake",
             "S3_PREFIX": "bronze/metrics",
             "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
+            # enable boto3 / s3fs debug logging (optional)
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
         },
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
-        volumes=[volume_scripts, volume_logs],
-        volume_mounts=[mount_scripts, mount_logs],
+        volumes=[volume_scripts],
+        volume_mounts=[mount_scripts],
         container_resources=pod_resources,
         security_context=security_ctx,
+        # Lấy log trực tiếp về Airflow rồi đẩy sang MinIO (theo config Airflow)
         get_logs=True,
-        is_delete_operator_pod=False,
+        is_delete_operator_pod=True,
         in_cluster=True,
         config_file=None,
     )
