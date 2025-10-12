@@ -71,7 +71,7 @@ with DAG(
         security_context=security_ctx,
         # Lấy log trực tiếp về Airflow rồi đẩy sang MinIO (theo config Airflow)
         get_logs=True,
-        is_delete_operator_pod=True,
+        is_delete_operator_pod=False,
         in_cluster=True,
         config_file=None,
     )
