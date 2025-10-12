@@ -12,7 +12,6 @@ default_args = {
 with DAG(
         dag_id="bronze_metrics_dag",
         description="Bronze layer: dump raw metrics from Prometheus → MinIO (S3)",
-        schedule="*/5 * * * *",
         start_date=datetime(2025, 9, 1),
         catchup=False,
         default_args=default_args,
