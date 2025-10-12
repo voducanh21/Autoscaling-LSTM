@@ -1,26 +1,28 @@
+from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime
-import logging
-import time
 
-def test_log():
-    logging.info("=== TEST REMOTE LOGGING START ===")
-    for i in range(3):
-        logging.info(f"Step {i+1}/3: working...")
-        time.sleep(2)
-    logging.warning("This is a sample warning log.")
-    logging.error("This is a sample error log.")
-    logging.info("=== TEST REMOTE LOGGING DONE ===")
+
+def test_write_log():
+    import logging
+    logging.info("===== Test log ghi vào MinIO =====")
+    logging.warning("Dòng WARNING để kiểm tra màu sắc log.")
+    print("Dòng print() này cũng phải thấy trong log nếu MinIO hoạt động.")
+    return "done"
+
 
 with DAG(
         dag_id="test_minio_log_dag",
-        start_date=datetime(2025, 10, 12),
+        description="Kiểm tra xem Airflow có ghi log lên MinIO thành công không",
+        start_date=datetime(2025, 10, 1),
         schedule=None,
         catchup=False,
-        tags=["test", "logging"],
+        tags=["test", "minio"],
 ) as dag:
+
     test_task = PythonOperator(
-        task_id="check_logs",
-        python_callable=test_log,
+        task_id="write_test_log",
+        python_callable=test_write_log,
     )
+
+    test_task
