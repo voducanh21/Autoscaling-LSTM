@@ -1,6 +1,7 @@
 from datetime import datetime
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from kubernetes import client as k8s
 
 with DAG(
         dag_id="bronze_metrics_dag",
@@ -27,21 +28,23 @@ with DAG(
             "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        secrets=[{"secret_name": "minio-cred"}],  # dùng cách mới thay vì env_from
-        volume_mounts=[
-            {
-                "name": "pipeline-scripts",
-                "mount_path": "/app",
-                "read_only": True,
-            }
+        env_from=[
+            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
         volumes=[
-            {
-                "name": "pipeline-scripts",
-                "config_map": {"name": "pipeline-scripts"},
-            }
+            k8s.V1Volume(
+                name="pipeline-scripts",
+                config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
+            )
         ],
-        is_delete_operator_pod=True,
+        volume_mounts=[
+            k8s.V1VolumeMount(
+                name="pipeline-scripts",
+                mount_path="/app",
+                read_only=True,
+            )
+        ],
         get_logs=True,
+        is_delete_operator_pod=True,
         in_cluster=True,
     )
