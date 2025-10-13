@@ -1,0 +1,91 @@
+mysql:
+  enabled: true
+
+  image:
+    registry: docker.io
+    repository: bitnami/mariadb
+    tag: latest
+
+  auth:
+    rootPassword: "12345678"
+    username: airflow
+    password: "12345678"
+    database: airflow
+
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: nfs-rwx
+
+airflow:
+  defaultAirflowTag: "3.0.6"
+  airflowVersion: "3.0.6"
+
+  # Disable Celery worker dependencies
+  executor: KubernetesExecutor
+  postgresql:
+    enabled: false
+  workers:
+    replicas: 0
+
+  logs:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: nfs-rwx
+
+  data:
+    metadataConnection:
+      user: airflow
+      pass: "12345678"
+      protocol: mysql
+      db: airflow
+      port: 3306
+      host: "airflow-mysql.airflow.svc.cluster.local"
+
+  config:
+    core:
+      load_examples: "True"
+
+  extraEnv: |
+    - name: AIRFLOW__CORE__LOAD_EXAMPLES
+      value: "True"
+
+  web:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+    startupProbe:
+      enabled: true
+      httpGet:
+        path: /api/v2/version
+        port: 8080
+      initialDelaySeconds: 120
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 30
+
+    livenessProbe:
+      enabled: true
+      httpGet:
+        path: /api/v2/version
+        port: 8080
+      initialDelaySeconds: 180
+      periodSeconds: 20
+      timeoutSeconds: 10
+      failureThreshold: 10
+
+  dags:
+    gitSync:
+      enabled: true
+      repo: "https://github.com/voducanh21/Autoscaling-LSTM.git"
+      branch: main
+      subPath: "autoscaling-lstm/data-pipeline/dags"
+      wait: 30
+      credentialsSecret: airflow-git-secret

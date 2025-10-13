@@ -17,6 +17,10 @@ images:
     tag: "3.1.0"
     pullPolicy: IfNotPresent
 
+airflow:
+  extraPipPackages:
+    - s3fs
+
 postgresql:
   enabled: true
   fullnameOverride: airflow-postgresql

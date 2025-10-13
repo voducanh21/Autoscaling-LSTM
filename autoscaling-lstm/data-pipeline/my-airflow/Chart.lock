@@ -1,0 +1,9 @@
+dependencies:
+- name: airflow
+  repository: https://airflow.apache.org
+  version: 1.18.0
+- name: mariadb
+  repository: https://charts.bitnami.com/bitnami
+  version: 22.0.0
+digest: sha256:8ccbc2af317f87844eec577ea47d371a8bd99a1490062255737b101c4ecdaa4a
+generated: "2025-10-13T12:41:55.8217238+07:00"
