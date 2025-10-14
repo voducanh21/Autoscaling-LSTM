@@ -66,19 +66,19 @@ airflow:
       httpGet:
         path: /api/v2/version
         port: 8080
-      initialDelaySeconds: 120
-      periodSeconds: 10
-      timeoutSeconds: 10
-      failureThreshold: 30
+      initialDelaySeconds: 180
+      periodSeconds: 15
+      timeoutSeconds: 20
+      failureThreshold: 40
 
     livenessProbe:
       enabled: true
       httpGet:
         path: /api/v2/version
         port: 8080
-      initialDelaySeconds: 180
-      periodSeconds: 20
-      timeoutSeconds: 10
+      initialDelaySeconds: 200
+      periodSeconds: 30
+      timeoutSeconds: 20
       failureThreshold: 10
 
   dags:
