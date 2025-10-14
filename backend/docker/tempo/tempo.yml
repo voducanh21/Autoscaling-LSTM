@@ -1,0 +1,16 @@
+server:
+  http_listen_port: 3100
+
+distributor:
+  receivers:
+    zipkin:
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo/traces
+
+query_frontend:
+  search:
+    default_result_limit: 20

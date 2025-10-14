@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    name: apps
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    name: infra
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring

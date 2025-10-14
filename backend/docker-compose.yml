@@ -1,6 +1,7 @@
-version: '4'
+version: '3.8'
 
 services:
+  # Database Services
   mysql:
     image: mysql:8.3.0
     container_name: mysql
@@ -11,6 +12,8 @@ services:
     volumes:
       - ./data/mysql:/var/lib/mysql
       - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ecommerce-network
 
   postgres:
     image: postgres:15
@@ -23,6 +26,8 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ecommerce-network
 
   mongodb:
     image: mongo:7.0.5
@@ -35,3 +40,63 @@ services:
     volumes:
       - ./data/mongodb:/data/db
       - ./docker/mongodb/init.js:/docker-entrypoint-initdb.d/init.js
+    networks:
+      - ecommerce-network
+
+  # Observability Stack
+  loki:
+    image: grafana/loki:main
+    container_name: loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
+    networks:
+      - ecommerce-network
+
+  prometheus:
+    image: prom/prometheus:v2.46.0
+    container_name: prometheus
+    command:
+      - --enable-feature=exemplar-storage
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - ecommerce-network
+
+  tempo:
+    image: grafana/tempo:2.2.2
+    container_name: tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./docker/tempo/tempo.yml:/etc/tempo.yaml:ro
+      - ./data/tempo:/tmp/tempo
+    ports:
+      - "3110:3100"  # Tempo
+      - "9411:9411"  # zipkin
+    networks:
+      - ecommerce-network
+
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    volumes:
+      - ./docker/grafana:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    ports:
+      - "3000:3000"
+    networks:
+      - ecommerce-network
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+networks:
+  ecommerce-network:
+    driver: bridge
