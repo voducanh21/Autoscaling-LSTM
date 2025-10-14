@@ -1,6 +1,6 @@
 import duckdb
 
-S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-10/service=payment-service"
+S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-14/service=payment-service"
 
 con = duckdb.connect()
 con.execute("""
@@ -9,8 +9,8 @@ con.execute("""
   SET s3_url_style='path';
   SET s3_endpoint='127.0.0.1:9000';
   SET s3_use_ssl=false;
-  SET s3_access_key_id='v8mkulsmdVrQ6a5DIEut';
-  SET s3_secret_access_key='ZXN06NuuBIqKWuE8E7KaO9a2iB84yNNXxhUlLRBd';
+  SET s3_access_key_id='RQpwLJ6SEL3dEDjxGUWw';
+  SET s3_secret_access_key='CLtRwSIAU1EzKEATqP91fVsC6sCFa069mO4lmrJO';
 """)
 
 # Đọc toàn bộ các file .parquet trong folder

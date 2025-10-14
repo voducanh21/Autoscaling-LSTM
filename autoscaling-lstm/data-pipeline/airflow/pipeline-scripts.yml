@@ -103,7 +103,6 @@ data:
                     storage_options=storage_opts,
                     use_dictionary=False
                 )
-  
                 print(f"[OK] wrote {path} (tz={TZ_NAME})")
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
@@ -113,10 +112,10 @@ data:
         main()
 
   silver_builder.py: |
-    # 🥈 Silver Layer (fixed version - handle dictionary encoding)
+    # 🥈 Silver Layer (dictionary-safe version)
     import os, sys
     import pandas as pd
-    import s3fs
+    import s3fs, pyarrow.parquet as pq, pyarrow as pa
 
     BUCKET      = os.getenv("S3_BUCKET", "datalake")
     BRONZE_PATH = os.getenv("BRONZE_PREFIX", "bronze/metrics")
@@ -135,20 +134,25 @@ data:
             dfs = []
             for f in files:
                 try:
-                    # ✅ Giải nén dictionary encoding và ép kiểu thống nhất
-                    d = pd.read_parquet(
-                        f"s3://{f}",
-                        engine="pyarrow",
-                        use_nullable_dtypes=True,
-                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}},
-                    ).copy()
+                    # Đọc bằng pyarrow, ép giải mã dictionary → string
+                    table = pq.read_table(f"s3://{f}", filesystem=fs)
+                    schema = table.schema
+                    for name in schema.names:
+                        field = schema.field(name)
+                        if pa.types.is_dictionary(field.type):
+                            arr = table[name].combine_chunks().dictionary_decode()
+                            table = table.set_column(
+                                schema.get_field_index(name),
+                                name,
+                                arr
+                            )
+                    d = table.to_pandas()
 
                     # Chuẩn hoá schema
                     if "service" in d.columns:
                         d["service"] = d["service"].astype(str)
                     if "ts" in d.columns:
                         d["ts"] = pd.to_datetime(d["ts"], errors="coerce").astype(str)
-
                     for col in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
                         if col in d.columns:
                             d[col] = pd.to_numeric(d[col], errors="coerce")
@@ -178,7 +182,6 @@ data:
 
     if __name__ == "__main__":
         main()
-
 
   gold_aggregator.py: |
     # 🥇 Gold Layer
