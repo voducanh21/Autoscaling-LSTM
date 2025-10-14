@@ -1,0 +1,266 @@
+version: '3.8'
+
+services:
+  # ==================== Databases ====================
+  mysql:
+    image: mysql:8.3.0
+    container_name: ecommerce-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./backend/data/mysql:/var/lib/mysql
+      - ./backend/docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  postgres:
+    image: postgres:15
+    container_name: ecommerce-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./backend/data/postgres:/var/lib/postgresql/data
+      - ./backend/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:7.0.5
+    container_name: ecommerce-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./backend/data/mongodb:/data/db
+      - ./backend/docker/mongodb/init.js:/docker-entrypoint-initdb.d/init.js
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ==================== Observability Stack ====================
+  loki:
+    image: grafana/loki:main
+    container_name: ecommerce-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.46.0
+    container_name: ecommerce-prometheus
+    command:
+      - --enable-feature=exemplar-storage
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./backend/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - ecommerce-network
+    depends_on:
+      - api-gateway
+      - authentication-service
+      - product-service
+      - order-service
+      - payment-service
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tempo:
+    image: grafana/tempo:2.2.2
+    container_name: ecommerce-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./backend/docker/tempo/tempo.yml:/etc/tempo.yaml:ro
+      - ./backend/data/tempo:/tmp/tempo
+    ports:
+      - "3110:3100"
+      - "9411:9411"
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: ecommerce-grafana
+    volumes:
+      - ./backend/docker/grafana:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    ports:
+      - "3000:3000"
+    networks:
+      - ecommerce-network
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Backend Services ====================
+  api-gateway:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/api-gateway:${TAG:-latest}
+    container_name: ecommerce-api-gateway
+    ports:
+      - "9000:9000"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOKI_URL=http://loki:3100
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://tempo:9411
+    networks:
+      - ecommerce-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  authentication-service:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/authentication-service:${TAG:-latest}
+    container_name: ecommerce-authentication-service
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOKI_URL=http://loki:3100
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://tempo:9411
+    networks:
+      - ecommerce-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  product-service:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/product-service:${TAG:-latest}
+    container_name: ecommerce-product-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOKI_URL=http://loki:3100
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://tempo:9411
+    networks:
+      - ecommerce-network
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order-service:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/order-service:${TAG:-latest}
+    container_name: ecommerce-order-service
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOKI_URL=http://loki:3100
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://tempo:9411
+    networks:
+      - ecommerce-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/payment-service:${TAG:-latest}
+    container_name: ecommerce-payment-service
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOKI_URL=http://loki:3100
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://tempo:9411
+    networks:
+      - ecommerce-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ==================== Frontend ====================
+  frontend:
+    image: ${DOCKERHUB_USERNAME:-voducanh}/ecommerce-frontend:${TAG:-latest}
+    container_name: ecommerce-frontend
+    ports:
+      - "4200:80"
+    networks:
+      - ecommerce-network
+    depends_on:
+      - api-gateway
+    restart: unless-stopped
+
+networks:
+  ecommerce-network:
+    driver: bridge
+    name: ecommerce-network
+
+volumes:
+  mysql-data:
+  postgres-data:
+  mongodb-data:
+  tempo-data:

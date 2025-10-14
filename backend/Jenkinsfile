@@ -1,5 +1,5 @@
 pipeline {
-    agent any
+    agent { label 'agent-01' }
 
     tools {
         maven 'Maven 3.9.6'
@@ -12,11 +12,13 @@ pipeline {
         TIMESTAMP = "${new Date().format('yyyyMMddHHmmss')}"
         DOCKERHUB_USERNAME = 'voducanh'
         REPO = 'https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git'
+        GIT_BRANCH = 'main'
     }
+
     stages {
         stage('Checkout') {
             steps {
-                git credentialsId: "${GIT_CRED_ID}", url: "${REPO}", branch: 'main'
+                git credentialsId: "${GIT_CRED_ID}", url: "${REPO}", branch: "${GIT_BRANCH}"
             }
         }
 
@@ -75,7 +77,7 @@ pipeline {
 
                     services.each { svc ->
                         def imageTag = "${svc.image}:${env.TIMESTAMP}"
-                        def yamlPath = "k8s/apps/${yamlFileMap[svc.name]}"
+                        def yamlPath = "backend/k8s/apps/${yamlFileMap[svc.name]}"
 
                         dir(svc.path) {
                             // Build Maven projects for backend services
@@ -106,15 +108,11 @@ pipeline {
                             }
                         }
 
-                        // ✏️ Update manifest if k8s files exist
-                        if (fileExists(yamlPath)) {
-                            def yamlContent = readFile(file: yamlPath)
-                            yamlContent = yamlContent.replaceAll(/image:\s+${svc.image.replace('/', '\\/')}:.*/, "image: ${imageTag}")
-                            writeFile file: yamlPath, text: yamlContent
-                            echo "✅ Updated ${yamlPath} with new image tag"
-                        } else {
-                            echo "⚠️ YAML file not found: ${yamlPath}"
-                        }
+                        // ✏️ Update manifest
+                        def yamlContent = readFile(file: yamlPath)
+                        yamlContent = yamlContent.replaceAll(/image:\s+${svc.image.replace('/', '\\/')}:.*/, "image: ${imageTag}")
+                        writeFile file: yamlPath, text: yamlContent
+                        echo "✅ Updated ${yamlPath} with new image tag"
                     }
                 }
             }
@@ -127,12 +125,12 @@ pipeline {
                         sh """
                             git config user.name "Jenkins CI"
                             git config user.email "jenkins@ecommerce.local"
-                            git add k8s/ || true
+                            git add backend/k8s/apps/*.yml || true
 
                             if ! git diff --cached --quiet; then
                                 echo "📝 Committing YAML changes..."
                                 git commit -m "ci: update image tags to ${TIMESTAMP} [skip-ci]"
-                                git push https://x-access-token:${GITHUB_TOKEN}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git HEAD:main
+                                git push https://x-access-token:${GITHUB_TOKEN}@github.com/PDung-DAnh-Java-Project/E-commerce_Web.git HEAD:${GIT_BRANCH}
                                 echo "✅ Changes pushed to repository"
                             else
                                 echo "✅ No YAML changes to commit"
@@ -143,6 +141,7 @@ pipeline {
             }
         }
     }
+
     post {
         always {
             echo "🧹 Cleaning up Docker images..."
