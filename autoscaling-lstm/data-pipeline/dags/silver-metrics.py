@@ -19,8 +19,8 @@ with DAG(
         image="python:3.11-slim",
         cmds=["/bin/sh", "-lc"],
         arguments=[
-            # Cài dependencies và chạy script từ ConfigMap mới
-            "pip install -q pandas pyarrow fsspec s3fs tzdata && "
+            # Cài dependencies và chạy script từ ConfigMap
+            "pip install -q pandas pyarrow fsspec tzdata && "
             "python /app/silver_builder.py"
         ],
         env_vars={
@@ -30,6 +30,7 @@ with DAG(
             "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
+        # ✅ giữ nguyên, để pyarrow nhận AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
         ],
@@ -37,18 +38,18 @@ with DAG(
             k8s.V1Volume(
                 name="silver-scripts",
                 config_map=k8s.V1ConfigMapVolumeSource(
-                    name="silver-metrics-script"  # ConfigMap mới
+                    name="silver-metrics-script"  # ✅ trỏ đúng ConfigMap silver mới
                 ),
             )
         ],
         volume_mounts=[
             k8s.V1VolumeMount(
                 name="silver-scripts",
-                mount_path="/app",  # mount file silver_builder.py
+                mount_path="/app",  # mount silver_builder.py
                 read_only=True,
             )
         ],
         get_logs=True,
-        is_delete_operator_pod=False,
+        is_delete_operator_pod=True,
         in_cluster=True,
     )
