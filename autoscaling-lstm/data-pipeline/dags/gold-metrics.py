@@ -19,6 +19,7 @@ with DAG(
         image="python:3.11-slim",
         cmds=["/bin/sh", "-lc"],
         arguments=[
+            # Cài dependencies và chạy script từ ConfigMap mới
             "pip install -q pandas pyarrow fsspec s3fs tzdata && "
             "python /app/gold_aggregator.py"
         ],
@@ -36,14 +37,16 @@ with DAG(
         ],
         volumes=[
             k8s.V1Volume(
-                name="pipeline-scripts",
-                config_map=k8s.V1ConfigMapVolumeSource(name="pipeline-scripts"),
+                name="gold-scripts",
+                config_map=k8s.V1ConfigMapVolumeSource(
+                    name="gold-metrics-script"  # ConfigMap mới
+                ),
             )
         ],
         volume_mounts=[
             k8s.V1VolumeMount(
-                name="pipeline-scripts",
-                mount_path="/app",
+                name="gold-scripts",
+                mount_path="/app",  # mount file gold_aggregator.py
                 read_only=True,
             )
         ],
