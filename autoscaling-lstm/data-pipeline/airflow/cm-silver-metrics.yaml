@@ -5,10 +5,11 @@ metadata:
   namespace: airflow
 data:
   silver_builder.py: |
-    # 🥈 Silver Layer (dictionary-safe version)
+    # 🥈 Silver Layer (use same S3 logic as Bronze)
     import os, sys
     import pandas as pd
-    import s3fs, pyarrow.parquet as pq, pyarrow as pa
+    import pyarrow as pa, pyarrow.parquet as pq
+    import s3fs
 
     BUCKET      = os.getenv("S3_BUCKET", "datalake")
     BRONZE_PATH = os.getenv("BRONZE_PREFIX", "bronze/metrics")
@@ -17,51 +18,56 @@ data:
 
     fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": S3_ENDPOINT})
 
+    SCHEMA = pa.schema([
+        ("ts", pa.string()),
+        ("service", pa.string()),
+        ("rps_1m", pa.float64()),
+        ("latency_p95_ms", pa.float64()),
+        ("cpu_cores_1m", pa.float64()),
+        ("mem_bytes", pa.float64()),
+        ("hour", pa.int64()),
+        ("dow", pa.int64()),
+    ])
+
     def main():
         try:
-            files = fs.glob(f"{BUCKET}/{BRONZE_PATH}/**/*.parquet")
+            files = fs.glob(f"{BUCKET}/{BRONZE_PATH}/date=*/service=*/*.parquet")
             if not files:
-                print("[WARN] no bronze data found")
+                print("[WARN] No bronze parquet files found")
                 return
 
             dfs = []
             for f in files:
                 try:
-                    table = pq.read_table(f"s3://{f}", filesystem=fs)
-                    schema = table.schema
-                    for name in schema.names:
-                        field = schema.field(name)
-                        if pa.types.is_dictionary(field.type):
-                            arr = table[name].combine_chunks().dictionary_decode()
-                            table = table.set_column(
-                                schema.get_field_index(name),
-                                name,
-                                arr
-                            )
-                    d = table.to_pandas()
-                    if "service" in d.columns:
-                        d["service"] = d["service"].astype(str)
-                    if "ts" in d.columns:
-                        d["ts"] = pd.to_datetime(d["ts"], errors="coerce").astype(str)
-                    for col in ["rps_1m","latency_p95_ms","cpu_cores_1m","mem_bytes"]:
-                        if col in d.columns:
-                            d[col] = pd.to_numeric(d[col], errors="coerce")
-                    dfs.append(d)
+                    with fs.open(f, "rb") as f_in:
+                        table = pq.read_table(f_in).combine_chunks().cast(SCHEMA, safe=False)
+                        dfs.append(table.to_pandas())
                 except Exception as e:
-                    print(f"[WARN] skip {f} ({e})", file=sys.stderr)
+                    print(f"[WARN] Skip {f} ({e})", file=sys.stderr)
+
             if not dfs:
-                print("[WARN] no valid parquet files")
+                print("[WARN] No valid parquet data")
                 return
+
             df = pd.concat(dfs, ignore_index=True)
             df = df.dropna(subset=["service", "ts"]).sort_values("ts")
-            out_path = f"s3://{BUCKET}/{SILVER_PATH}/silver-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
-            df.to_parquet(
-                out_path,
-                index=False,
-                engine="pyarrow",
-                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}},
-            )
-            print(f"[OK] wrote {out_path}")
+
+            df = df.astype({
+                "service": "string",
+                "ts": "string",
+                "rps_1m": "float64",
+                "latency_p95_ms": "float64",
+                "cpu_cores_1m": "float64",
+                "mem_bytes": "float64",
+                "hour": "int64",
+                "dow": "int64",
+            })
+
+            out_path = f"{BUCKET}/{SILVER_PATH}/silver-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
+            with fs.open(out_path, "wb") as f_out:
+                pq.write_table(pa.Table.from_pandas(df, preserve_index=False).cast(SCHEMA, safe=False), f_out)
+            print(f"[OK] wrote s3://{out_path}")
+
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)

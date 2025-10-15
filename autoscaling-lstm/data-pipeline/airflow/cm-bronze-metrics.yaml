@@ -78,6 +78,7 @@ data:
 
             rows = [collect(svc) for svc in sorted(jobs)]
             df = pd.DataFrame(rows)
+
             df["service"] = df["service"].astype(str)
             df["ts"] = pd.to_datetime(df["ts"]).astype(str)
             df = df.astype({
@@ -92,6 +93,7 @@ data:
             now = datetime.now(TZ)
             date = now.strftime("%Y-%m-%d")
             part = int(now.timestamp())
+
             for svc, sub in df.groupby("service"):
                 path = f"s3://{BUCKET}/{PREFIX}/date={date}/service={svc}/part-{part}.parquet"
                 sub.to_parquet(
