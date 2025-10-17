@@ -1,11 +1,6 @@
 mysql:
   enabled: true
 
-  image:
-    registry: docker.io
-    repository: bitnami/mariadb
-    tag: latest
-
   auth:
     rootPassword: "12345678"
     username: airflow
@@ -15,8 +10,24 @@ mysql:
   primary:
     persistence:
       enabled: true
-      size: 20Gi
+      size: 5Gi
       storageClass: nfs-rwx
+
+nfs:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: standard-wffc
+
+  storageClass:
+    create: true
+    name: nfs-rwx
+    defaultClass: false
+    mountOptions:
+      - vers=4.1
+      - retrans=2
+      - timeo=30
 
 airflow:
   defaultAirflowTag: "3.0.6"
@@ -32,7 +43,7 @@ airflow:
   logs:
     persistence:
       enabled: true
-      size: 5Gi
+      size: 1Gi
       storageClassName: nfs-rwx
 
   data:
@@ -51,35 +62,6 @@ airflow:
   extraEnv: |
     - name: AIRFLOW__CORE__LOAD_EXAMPLES
       value: "True"
-
-  web:
-    resources:
-      requests:
-        cpu: 250m
-        memory: 512Mi
-      limits:
-        cpu: 500m
-        memory: 1Gi
-
-    startupProbe:
-      enabled: true
-      httpGet:
-        path: /api/v2/version
-        port: 8080
-      initialDelaySeconds: 180
-      periodSeconds: 15
-      timeoutSeconds: 20
-      failureThreshold: 40
-
-    livenessProbe:
-      enabled: true
-      httpGet:
-        path: /api/v2/version
-        port: 8080
-      initialDelaySeconds: 200
-      periodSeconds: 30
-      timeoutSeconds: 20
-      failureThreshold: 10
 
   dags:
     gitSync:

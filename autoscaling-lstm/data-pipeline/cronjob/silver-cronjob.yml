@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: silver-metrics-cronjob
+  namespace: cronjob
+spec:
+  schedule: "*/10 * * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: silver-metrics
+              image: python:3.11-slim
+              command: ["/bin/sh", "-lc"]
+              args:
+                - >
+                  pip install -q pandas pyarrow fsspec s3fs tzdata &&
+                  python /app/silver_builder.py
+              env:
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: BRONZE_PREFIX
+                  value: "bronze/metrics"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+                - name: S3_ENDPOINT
+                  value: "http://minio.minio.svc.cluster.local:9000"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+              volumeMounts:
+                - name: silver-script
+                  mountPath: /app
+          volumes:
+            - name: silver-script
+              configMap:
+                name: silver-metrics-script

@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gold-metrics-cronjob
+  namespace: airflow
+spec:
+  schedule: "*/15 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: gold-metrics
+              image: python:3.11-slim
+              command: ["/bin/sh", "-lc"]
+              args:
+                - >
+                  pip install -q pandas pyarrow s3fs &&
+                  python /app/gold_aggregator.py
+              env:
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+                - name: GOLD_PREFIX
+                  value: "gold/metrics"
+                - name: S3_ENDPOINT
+                  value: "http://minio.minio.svc.cluster.local:9000"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: rootUser
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: rootPassword
+              volumeMounts:
+                - name: gold-script
+                  mountPath: /app
+          volumes:
+            - name: gold-script
+              configMap:
+                name: gold-metrics-script

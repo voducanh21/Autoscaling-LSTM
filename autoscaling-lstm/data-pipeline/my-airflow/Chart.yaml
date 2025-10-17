@@ -11,11 +11,11 @@ dependencies:
     alias: airflow
     condition: airflow.enabled
   - name: mariadb
-    version: 22.0.0
+    version: 23.1.1
     repository: "https://charts.bitnami.com/bitnami"
     alias: mysql
     condition: mysql.enabled
-  # - name: nfs-server-provisioner
-  #   version: "1.8.0"
-  #   repository: "https://kvaps.github.io/charts"
-  #   alias: nfs
+  - name: nfs-server-provisioner
+    version: "1.8.0"
+    repository: "https://kvaps.github.io/charts"
+    alias: nfs

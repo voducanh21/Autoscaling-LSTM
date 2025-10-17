@@ -4,6 +4,9 @@ dependencies:
   version: 1.18.0
 - name: mariadb
   repository: https://charts.bitnami.com/bitnami
-  version: 22.0.0
-digest: sha256:8ccbc2af317f87844eec577ea47d371a8bd99a1490062255737b101c4ecdaa4a
-generated: "2025-10-13T12:41:55.8217238+07:00"
+  version: 23.1.1
+- name: nfs-server-provisioner
+  repository: https://kvaps.github.io/charts
+  version: 1.8.0
+digest: sha256:e2392158d3e84990af18ec80dc44c9619b3ea44b02effd44f0d4709b5ab99591
+generated: "2025-10-17T21:55:37.5109827+07:00"
