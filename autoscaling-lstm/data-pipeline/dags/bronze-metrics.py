@@ -1,12 +1,12 @@
 from datetime import datetime
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from kubernetes import client as k8s
 
 with DAG(
         dag_id="bronze_metrics_dag",
+        description="Bronze layer: dump raw metrics from Prometheus → MinIO (S3)",
         start_date=datetime(2025, 9, 1),
-        schedule=None,
+        schedule=None,  # tắt tự động chạy
         catchup=False,
         tags=["bronze", "metrics"],
 ) as dag:
@@ -16,9 +16,10 @@ with DAG(
         name="bronze-metrics",
         namespace="airflow",
         image="python:3.11-slim",
+        image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
         arguments=[
-            # Cài dependency và chạy script từ ConfigMap mới
+            # cài dependencies và chạy script từ ConfigMap bronze-metrics-script
             "pip install -q pandas pyarrow requests fsspec s3fs tzdata && "
             "python /app/metrics_dumper.py"
         ],
@@ -29,25 +30,24 @@ with DAG(
             "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
         },
-        env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
+        # lấy credentials từ secret minio-cred
+        secrets=[{"secret_name": "minio-cred"}],
+        # mount ConfigMap đúng tên mà CronJob đã dùng
+        volume_mounts=[
+            {
+                "name": "bronze-metrics-script",
+                "mount_path": "/app",
+                "read_only": True,
+            }
         ],
         volumes=[
-            k8s.V1Volume(
-                name="bronze-scripts",
-                config_map=k8s.V1ConfigMapVolumeSource(
-                    name="bronze-metrics-script"  # ConfigMap mới
-                ),
-            )
+            {
+                "name": "bronze-metrics-script",
+                "config_map": {"name": "bronze-metrics-script"},
+            }
         ],
-        volume_mounts=[
-            k8s.V1VolumeMount(
-                name="bronze-scripts",
-                mount_path="/app",  # mount script metrics_dumper.py
-                read_only=True,
-            )
-        ],
-        get_logs=True,
+        # giữ pod sạch sau khi chạy
         is_delete_operator_pod=True,
+        get_logs=True,
         in_cluster=True,
     )
