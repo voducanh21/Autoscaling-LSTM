@@ -10,15 +10,15 @@ mysql:
   primary:
     persistence:
       enabled: true
-      size: 5Gi
+      size: 2Gi
       storageClass: nfs-rwx
 
 nfs:
   enabled: true
   persistence:
     enabled: true
-    size: 1Gi
-    storageClass: standard-wffc
+    size: 2Gi
+    storageClass: standard
 
   storageClass:
     create: true
@@ -43,7 +43,7 @@ airflow:
   logs:
     persistence:
       enabled: true
-      size: 1Gi
+      size: 2Gi
       storageClassName: nfs-rwx
 
   data:
@@ -71,3 +71,13 @@ airflow:
       subPath: "autoscaling-lstm/data-pipeline/dags"
       wait: 30
       credentialsSecret: airflow-git-secret
+
+  api:
+    startupProbe:
+      httpGet:
+        path: /api/v2/version
+        port: 8080
+      initialDelaySeconds: 120
+      periodSeconds: 10
+      failureThreshold: 12
+      timeoutSeconds: 10

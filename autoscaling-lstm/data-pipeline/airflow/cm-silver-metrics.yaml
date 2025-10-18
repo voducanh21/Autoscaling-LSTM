@@ -5,9 +5,10 @@ metadata:
   namespace: airflow
 data:
   silver_builder.py: |
-    # 🥈 Silver Layer
     import os, sys, json
     import pandas as pd
+    import s3fs
+    import pyarrow.parquet as pq
     from datetime import datetime, timezone, timedelta
     from zoneinfo import ZoneInfo
 
@@ -18,9 +19,9 @@ data:
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
-    PAST_HOURS = int(os.getenv("PAST_HOURS", "48"))  # gom 48h gần nhất
-    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[5,15]"))  # phút
-    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,5,10]"))
+    PAST_HOURS = int(os.getenv("PAST_HOURS", "48"))
+    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[1,3]"))      # mềm hơn
+    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3]"))      # ngắn hơn
 
     try:
         TZ = ZoneInfo(TZ_NAME)
@@ -32,28 +33,47 @@ data:
         "secret": AWS_SECRET,
         "client_kwargs": {"endpoint_url": S3_ENDPOINT}
     }
-    
-    
+
     def read_bronze():
-        # đọc tất cả partitions 48h gần đây
         now = datetime.now(TZ)
         dates = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range((PAST_HOURS // 24) + 2)}
         dfs = []
+        fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs={"endpoint_url": S3_ENDPOINT})
+
         for d in sorted(dates):
-            prefix = f"s3://{BUCKET}/{BRONZE_PREF}/date={d}/"
+            base = f"{BUCKET}/{BRONZE_PREF}/date={d}/"
             try:
-                df = pd.read_parquet(prefix, storage_options=storage_opts)
-                dfs.append(df)
-            except Exception:
-                continue
+                files = fs.glob(base + "service=*/part-*.parquet")
+                if not files:
+                    print(f"[WARN] No parquet files under {base}")
+                    continue
+
+                for f in files:
+                    try:
+                        with fs.open(f, "rb") as fobj:
+                            table = pq.read_table(fobj, read_dictionary=[])
+                            if "service" in table.column_names:
+                                table = table.set_column(
+                                    table.schema.get_field_index("service"),
+                                    "service",
+                                    table["service"].cast("string")
+                                )
+                            df = table.to_pandas()
+                            dfs.append(df)
+                    except Exception as e:
+                        print(f"[WARN] Skip {f}: {e}")
+
+                print(f"[INFO] Loaded {len(files)} parquet files from {base}")
+
+            except Exception as e:
+                print(f"[WARN] Error listing {base}: {e}")
+
         if not dfs:
             raise RuntimeError("No bronze data found")
-        df = pd.concat(dfs, ignore_index=True)
-        return df
-    
-    
+
+        return pd.concat(dfs, ignore_index=True)
+
     def enforce_schema(df):
-        # ép kiểu, sort theo ts
         df = df.copy()
         df["service"] = df["service"].astype(str)
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
@@ -64,34 +84,28 @@ data:
         df["dow"] = pd.to_numeric(df["dow"], errors="coerce").astype("Int64")
         df = df.dropna(subset=["ts", "service"])
         return df.sort_values("ts")
-    
-    
+
     def add_features(g):
-        g = g.set_index("ts").asfreq("T")  # chuẩn hoá theo phút
-        # điền thiếu bằng forward-fill an toàn
+        g = g.set_index("ts").asfreq("min")  # thay 'T' → 'min'
         for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
             g[c] = g[c].ffill()
-        # rolling
         for w in ROLL_LIST:
-            g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}T").mean()
-            g[f"p95_roll_mean_{w}m"] = g["latency_p95_ms"].rolling(f"{w}T").mean()
-        # lag
+            g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}min").mean()
+            g[f"p95_roll_mean_{w}m"] = g["latency_p95_ms"].rolling(f"{w}min").mean()
         for l in LAG_LIST:
             g[f"rps_lag_{l}m"] = g["rps_1m"].shift(l)
             g[f"p95_lag_{l}m"] = g["latency_p95_ms"].shift(l)
             g[f"cpu_lag_{l}m"] = g["cpu_cores_1m"].shift(l)
             g[f"mem_lag_{l}m"] = g["mem_bytes"].shift(l)
-        # time features
         idx = g.index.tz_convert(TZ) if g.index.tzinfo else g.index.tz_localize(TZ)
         g["hour"] = idx.hour
         g["dow"] = idx.weekday
         return g.reset_index().rename(columns={"index": "ts"})
-    
-    
+
     def write_silver(df):
         if df.empty:
+            print("[WARN] No rows to write.")
             return
-        # ghi theo partition date/service
         df["date"] = df["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
         now = datetime.now(TZ)
         part = int(now.timestamp())
@@ -103,20 +117,19 @@ data:
                     storage_options=storage_opts, use_dictionary=False
                 )
                 print(f"[OK] wrote {path}")
-    
-    
+
     def main():
         try:
             raw = read_bronze()
             raw = enforce_schema(raw)
             out = raw.groupby("service", group_keys=False).apply(add_features)
-            # loại hàng mới tạo nhưng thiếu do lag/rolling
-            out = out.dropna().reset_index(drop=True)
+            # Không dropna để giữ lại dữ liệu ít
+            out = out.reset_index(drop=True)
+            print(f"[INFO] Output rows: {len(out)}")
             write_silver(out)
         except Exception as e:
-            print(f"[ERROR] {e}", file=sys.stderr);
+            print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)
-    
-    
+
     if __name__ == "__main__":
         main()

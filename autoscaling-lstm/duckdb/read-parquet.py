@@ -1,29 +1,26 @@
-import duckdb
+import pyarrow.parquet as pq
+import s3fs
+import pandas as pd
 
-S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-14/service=payment-service"
+# --- Kết nối MinIO qua S3 API ---
+fs = s3fs.S3FileSystem(
+    key="1Z3UT6tcLTuxaDrJYoyO",
+    secret="6Vs1ORxhTNzcgzRyTvQsslsWVEfhH1ESxsbaVRRx",
+    client_kwargs={"endpoint_url": "http://127.0.0.1:9000"},
+)
 
-con = duckdb.connect()
-con.execute("""
-  INSTALL httpfs;
-  LOAD httpfs;
-  SET s3_url_style='path';
-  SET s3_endpoint='127.0.0.1:9000';
-  SET s3_use_ssl=false;
-  SET s3_access_key_id='RQpwLJ6SEL3dEDjxGUWw';
-  SET s3_secret_access_key='CLtRwSIAU1EzKEATqP91fVsC6sCFa069mO4lmrJO';
-""")
+# --- Đường dẫn file silver ---
+path = "datalake/silver/metrics/date=2025-10-18/service=authentication-service/part-1760724386.parquet"
 
-# Đọc toàn bộ các file .parquet trong folder
-df = con.execute(f"""
-  SELECT *
-  FROM read_parquet('{S3_PATH}/*.parquet')
-  ORDER BY ts
-  LIMIT 100
-""").fetchdf()
+# --- Đọc thủ công bằng PyArrow ---
+with fs.open(path, "rb") as f:
+    table = pq.read_table(f, read_dictionary=[])  # tắt dictionary decoding
+    df = table.to_pandas()
 
-print("=== Preview (100 rows) ===")
-print(df.to_string(index=False))
+print("=== Schema trong Parquet ===")
+print(table.schema)
 
-# Đếm tổng số dòng
-n_rows = con.execute(f"SELECT count(*) FROM read_parquet('{S3_PATH}/*.parquet')").fetchone()[0]
-print("\nTổng số dòng:", n_rows)
+print("\n=== 10 dòng đầu ===")
+print(df.head(10).to_string(index=False))
+
+print("\nTổng số dòng:", len(df))

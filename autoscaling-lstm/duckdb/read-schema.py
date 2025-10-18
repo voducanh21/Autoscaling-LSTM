@@ -1,7 +1,7 @@
 import duckdb
 
 # === Cấu hình S3 ===
-S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-15/service=product-service"
+S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-18/service=product-service"
 
 # === Kết nối và cấu hình DuckDB + HTTPFS ===
 con = duckdb.connect()
@@ -12,8 +12,8 @@ con.execute("""
   SET s3_url_style='path';
   SET s3_endpoint='127.0.0.1:9000';
   SET s3_use_ssl=false;
-  SET s3_access_key_id='RQpwLJ6SEL3dEDjxGUWw';
-  SET s3_secret_access_key='CLtRwSIAU1EzKEATqP91fVsC6sCFa069mO4lmrJO';
+  SET s3_access_key_id='1Z3UT6tcLTuxaDrJYoyO';
+  SET s3_secret_access_key='6Vs1ORxhTNzcgzRyTvQsslsWVEfhH1ESxsbaVRRx';
 """)
 
 # === Đọc trước vài dòng để xem dữ liệu (tắt hive_partitioning) ===
