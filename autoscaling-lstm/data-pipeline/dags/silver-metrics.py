@@ -5,9 +5,10 @@ from kubernetes import client as k8s
 
 with DAG(
         dag_id="silver_metrics_dag",
-        start_date=datetime(2025, 9, 1),
+        start_date=datetime(2025, 10, 18),
         schedule=None,
         catchup=False,
+        max_active_runs=1,
         tags=["silver","metrics"],
 ) as dag:
     silver = KubernetesPodOperator(
