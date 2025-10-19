@@ -2,9 +2,10 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: gold-metrics-cronjob
-  namespace: airflow
+  namespace: cronjob
 spec:
   schedule: "*/15 * * * *"
+  suspend: true
   jobTemplate:
     spec:
       template:
@@ -31,12 +32,12 @@ spec:
                   valueFrom:
                     secretKeyRef:
                       name: minio-cred
-                      key: rootUser
+                      key: AWS_ACCESS_KEY_ID
                 - name: AWS_SECRET_ACCESS_KEY
                   valueFrom:
                     secretKeyRef:
                       name: minio-cred
-                      key: rootPassword
+                      key: AWS_SECRET_ACCESS_KEY
               volumeMounts:
                 - name: gold-script
                   mountPath: /app

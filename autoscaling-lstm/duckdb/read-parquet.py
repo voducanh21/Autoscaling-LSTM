@@ -9,12 +9,16 @@ fs = s3fs.S3FileSystem(
     client_kwargs={"endpoint_url": "http://127.0.0.1:9000"},
 )
 
-# --- Đường dẫn file silver ---
-path = "datalake/silver/metrics/date=2025-10-18/service=authentication-service/part-1760724386.parquet"
+# --- Tự động tìm file gold mới nhất ---
+files = sorted(fs.glob("datalake/gold/metrics/gold-*.parquet"))
+if not files:
+    raise FileNotFoundError("Không tìm thấy file nào trong datalake/gold/metrics/")
+latest = files[-1]
+print(f"Đang đọc file gold mới nhất: {latest}")
 
-# --- Đọc thủ công bằng PyArrow ---
-with fs.open(path, "rb") as f:
-    table = pq.read_table(f, read_dictionary=[])  # tắt dictionary decoding
+# --- Đọc file parquet ---
+with fs.open(latest, "rb") as f:
+    table = pq.read_table(f, read_dictionary=[])
     df = table.to_pandas()
 
 print("=== Schema trong Parquet ===")

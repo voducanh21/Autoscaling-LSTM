@@ -57,11 +57,11 @@ airflow:
 
   config:
     core:
-      load_examples: "True"
+      load_examples: "False"
 
   extraEnv: |
     - name: AIRFLOW__CORE__LOAD_EXAMPLES
-      value: "True"
+      value: "False"
 
   dags:
     gitSync:
@@ -73,11 +73,39 @@ airflow:
       credentialsSecret: airflow-git-secret
 
   api:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
     startupProbe:
       httpGet:
         path: /api/v2/version
         port: 8080
       initialDelaySeconds: 120
       periodSeconds: 10
-      failureThreshold: 12
+      failureThreshold: 15
       timeoutSeconds: 10
+
+    livenessProbe:
+      httpGet:
+        path: /api/v2/version
+        port: 8080
+      initialDelaySeconds: 180
+      periodSeconds: 20
+      timeoutSeconds: 10
+      failureThreshold: 5
+
+    readinessProbe:
+      httpGet:
+        path: /api/v2/version
+        port: 8080
+      initialDelaySeconds: 150
+      periodSeconds: 20
+      timeoutSeconds: 10
+      failureThreshold: 5
+
+

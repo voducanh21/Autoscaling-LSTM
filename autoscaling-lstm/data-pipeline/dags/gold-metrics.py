@@ -6,12 +6,12 @@ from kubernetes import client as k8s
 with DAG(
         dag_id="gold_metrics_dag",
         description="Gold layer: aggregate silver → gold",
-        schedule=None,
-        start_date=datetime(2025, 9, 1),
+        start_date=datetime(2025, 10, 18),
+        schedule="*/30 * * * *",   # chạy mỗi 30 phút (đi sau silver)
         catchup=False,
+        max_active_runs=1,
         tags=["gold", "metrics"],
 ) as dag:
-
     gold = KubernetesPodOperator(
         task_id="gold_metrics",
         name="gold-metrics",
@@ -19,7 +19,6 @@ with DAG(
         image="python:3.11-slim",
         cmds=["/bin/sh", "-lc"],
         arguments=[
-            # Cài dependencies và chạy script từ ConfigMap mới
             "pip install -q pandas pyarrow fsspec s3fs tzdata && "
             "python /app/gold_aggregator.py"
         ],
@@ -39,14 +38,14 @@ with DAG(
             k8s.V1Volume(
                 name="gold-scripts",
                 config_map=k8s.V1ConfigMapVolumeSource(
-                    name="gold-metrics-script"  # ConfigMap mới
+                    name="gold-metrics-script"
                 ),
             )
         ],
         volume_mounts=[
             k8s.V1VolumeMount(
                 name="gold-scripts",
-                mount_path="/app",  # mount file gold_aggregator.py
+                mount_path="/app",
                 read_only=True,
             )
         ],

@@ -5,56 +5,110 @@ metadata:
   namespace: airflow
 data:
   gold_aggregator.py: |
-    # 🥇 Gold Layer
+    # 🥇 Gold Layer (aligned with Silver)
     import os, sys
     import pandas as pd
     import s3fs
+    import pyarrow.parquet as pq
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
 
-    BUCKET      = os.getenv("S3_BUCKET", "datalake")
-    SILVER_PATH = os.getenv("SILVER_PREFIX", "silver/metrics")
-    GOLD_PATH   = os.getenv("GOLD_PREFIX", "gold/metrics")
+    BUCKET = os.getenv("S3_BUCKET", "datalake")
+    SILVER_PREF = os.getenv("SILVER_PREFIX", "silver/metrics")
+    GOLD_PREF = os.getenv("GOLD_PREFIX", "gold/metrics")
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+    TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 
-    fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": S3_ENDPOINT})
+    try:
+        TZ = ZoneInfo(TZ_NAME)
+    except Exception:
+        TZ = timezone.utc
+
+    storage_opts = {
+        "key": AWS_KEY,
+        "secret": AWS_SECRET,
+        "client_kwargs": {"endpoint_url": S3_ENDPOINT}
+    }
+
+    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs={"endpoint_url": S3_ENDPOINT})
+
+    def read_silver():
+        files = fs.glob(f"{BUCKET}/{SILVER_PREF}/**/*.parquet")
+        if not files:
+            print("[WARN] No silver data found")
+            return pd.DataFrame()
+
+        dfs = []
+        for f in files:
+            try:
+                with fs.open(f, "rb") as fobj:
+                    table = pq.read_table(fobj, read_dictionary=[])
+                    if "service" in table.column_names:
+                        table = table.set_column(
+                            table.schema.get_field_index("service"),
+                            "service",
+                            table["service"].cast("string")
+                        )
+                    df = table.to_pandas()
+                    dfs.append(df)
+            except Exception as e:
+                print(f"[WARN] Skip {f}: {e}")
+
+        if not dfs:
+            print("[WARN] No valid silver files")
+            return pd.DataFrame()
+
+        return pd.concat(dfs, ignore_index=True)
+
+    def enforce_schema(df):
+        df = df.copy()
+        df["service"] = df["service"].astype(str)
+        df["hour"] = pd.to_numeric(df["hour"], errors="coerce").astype("Int64")
+        df["dow"] = pd.to_numeric(df["dow"], errors="coerce").astype("Int64")
+        for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df.dropna(subset=["service", "hour", "dow"])
+
+    def aggregate(df):
+        agg = (
+            df.groupby(["service", "hour", "dow"], dropna=True)
+            .agg({
+                "rps_1m": "mean",
+                "latency_p95_ms": "mean",
+                "cpu_cores_1m": "mean",
+                "mem_bytes": "mean"
+            })
+            .reset_index()
+        )
+        return agg
+
+    def write_gold(df):
+        if df.empty:
+            print("[WARN] No data to write")
+            return
+        now = datetime.now(TZ)
+        ts = now.strftime("%Y%m%d%H%M%S")
+        path = f"s3://{BUCKET}/{GOLD_PREF}/gold-{ts}.parquet"
+        df.to_parquet(
+            path,
+            index=False,
+            engine="pyarrow",
+            storage_options=storage_opts,
+            use_dictionary=False
+        )
+        print(f"[OK] wrote {path}")
 
     def main():
         try:
-            files = fs.glob(f"{BUCKET}/{SILVER_PATH}/*.parquet")
-            if not files:
-                print("[WARN] no silver data found"); return
-            dfs = []
-            for f in files:
-                try:
-                    d = pd.read_parquet(
-                        f"s3://{f}",
-                        storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
-                    )
-                    if "service" in d.columns:
-                        d["service"] = d["service"].astype(str)
-                    dfs.append(d)
-                except Exception as e:
-                    print(f"[WARN] skip {f} ({e})", file=sys.stderr)
-            if not dfs:
-                print("[WARN] no valid silver files")
+            df = read_silver()
+            if df.empty:
                 return
-            df = pd.concat(dfs, ignore_index=True)
-            agg = (
-                df.groupby(["service", "hour", "dow"], dropna=True)
-                .agg({
-                    "rps_1m": "mean",
-                    "latency_p95_ms": "mean",
-                    "cpu_cores_1m": "mean",
-                    "mem_bytes": "mean"
-                })
-                .reset_index()
-            )
-            out_path = f"s3://{BUCKET}/{GOLD_PATH}/gold-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}.parquet"
-            agg.to_parquet(
-                out_path,
-                index=False,
-                storage_options={"client_kwargs": {"endpoint_url": S3_ENDPOINT}}
-            )
-            print(f"[OK] wrote {out_path}")
+            df = enforce_schema(df)
+            out = aggregate(df)
+            print(f"[INFO] Aggregated {len(out)} rows")
+            write_gold(out)
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)
