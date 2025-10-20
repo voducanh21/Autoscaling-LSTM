@@ -9,22 +9,18 @@ fs = s3fs.S3FileSystem(
     client_kwargs={"endpoint_url": "http://127.0.0.1:9000"},
 )
 
-# --- Tự động tìm file gold mới nhất ---
-files = sorted(fs.glob("datalake/gold/metrics/gold-*.parquet"))
-if not files:
-    raise FileNotFoundError("Không tìm thấy file nào trong datalake/gold/metrics/")
-latest = files[-1]
-print(f"Đang đọc file gold mới nhất: {latest}")
+# --- Đọc file Bronze mới nhất (20/10) ---
+latest = "datalake/bronze/metrics/date=2025-10-20/service=api-gateway/part-1760896643.parquet"
+print(f"Đang đọc file: {latest}")
 
-# --- Đọc file parquet ---
 with fs.open(latest, "rb") as f:
-    table = pq.read_table(f, read_dictionary=[])
+    table = pq.read_table(f)
     df = table.to_pandas()
 
 print("=== Schema trong Parquet ===")
 print(table.schema)
 
-print("\n=== 10 dòng đầu ===")
-print(df.head(10).to_string(index=False))
+print("\n=== Nội dung dữ liệu ===")
+print(df.to_string(index=False))
 
 print("\nTổng số dòng:", len(df))

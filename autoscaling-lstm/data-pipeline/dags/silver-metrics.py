@@ -6,7 +6,7 @@ from kubernetes import client as k8s
 with DAG(
         dag_id="silver_metrics_dag",
         start_date=datetime(2025, 10, 18),
-        schedule="*/20 * * * *",
+        schedule="*/10 * * * *",
         catchup=False,
         max_active_runs=1,
         tags=["silver","metrics"],

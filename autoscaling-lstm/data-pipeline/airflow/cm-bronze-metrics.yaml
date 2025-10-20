@@ -5,11 +5,9 @@ metadata:
   namespace: airflow
 data:
   metrics_dumper.py: |
-    # 🥉 Bronze Layer
-    import os, sys
-    import requests
-    import pandas as pd
-    from datetime import datetime, timezone
+    # 🥉 Bronze Layer — sample ~3 points in last 5 minutes
+    import os, sys, requests, pandas as pd
+    from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
     PROM_URL    = os.getenv("PROM_URL")
@@ -32,55 +30,84 @@ data:
         "client_kwargs": {"endpoint_url": S3_ENDPOINT}
     }
 
-    def prom_query(q):
-        r = requests.get(f"{PROM_URL}/api/v1/query", params={"query": q}, timeout=10)
+    def prom_query_range(query, minutes=5, step="2m"):
+        """Query Prometheus for the last 5 minutes, 2-minute step (~3 points)."""
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(minutes=minutes)
+        r = requests.get(
+            f"{PROM_URL}/api/v1/query_range",
+            params={"query": query, "start": start.timestamp(), "end": end.timestamp(), "step": step},
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()["data"]["result"]
 
-    def get_scalar(query):
-        res = prom_query(query)
-        if not res:
-            return None
-        try:
-            return float(res[0]["value"][1])
-        except Exception:
-            return None
-
-    def get_cpu_cores_1m(service):
-        return get_scalar(f'sum(pod:cpu:usage1m{{namespace="apps",pod=~"{service}-.*"}})')
-
-    def get_mem_bytes(service):
-        return get_scalar(f'sum(pod:mem:usage{{namespace="apps",pod=~"{service}-.*"}})')
-
-    def collect(service):
-        rps = get_scalar(f'svc:qps:rate1m{{job="{service}"}}')
-        p95_ms = get_scalar(f'svc:latency_p95_ms_1m{{job="{service}"}}')
-        cpu = get_cpu_cores_1m(service)
-        mem = get_mem_bytes(service)
-
-        now = datetime.now(TZ)
-        return {
-            "ts": now.isoformat(),
-            "service": str(service),
-            "rps_1m": rps,
-            "latency_p95_ms": p95_ms,
-            "cpu_cores_1m": cpu,
-            "mem_bytes": mem,
-            "hour": now.hour,
-            "dow": now.weekday()
+    def collect_series(service):
+        metrics = {
+            "rps_1m": f'svc:qps:rate1m{{job="{service}"}}',
+            "latency_p95_ms": f'svc:latency_p95_ms_1m{{job="{service}"}}',
+            "cpu_cores_1m": f'sum(pod:cpu:usage1m{{namespace="apps",pod=~"{service}-.*"}})',
+            "mem_bytes": f'sum(pod:mem:usage{{namespace="apps",pod=~"{service}-.*"}})',
         }
+
+        dfs = []
+        for name, query in metrics.items():
+            res = prom_query_range(query)
+            if not res:
+                continue
+            df = pd.DataFrame(res[0]["values"], columns=["ts", name])
+            df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True)
+            df[name] = df[name].astype(float)
+            dfs.append(df)
+
+        if not dfs:
+            return pd.DataFrame()
+
+        out = dfs[0]
+        for d in dfs[1:]:
+            out = pd.merge_asof(
+                out.sort_values("ts"),
+                d.sort_values("ts"),
+                on="ts",
+                direction="nearest",
+                tolerance=pd.Timedelta("30s"),
+            )
+
+        out = (
+            out.set_index("ts")
+            .resample("2min")
+            .mean()
+            .interpolate(limit_direction="both")
+            .reset_index()
+        )
+
+        out["service"] = service
+        # Fix timezone conversion safely
+        if out["ts"].dt.tz is None:
+            out["ts"] = out["ts"].dt.tz_localize("UTC").dt.tz_convert(TZ)
+        else:
+            out["ts"] = out["ts"].dt.tz_convert(TZ)
+
+        out["hour"] = out["ts"].dt.hour
+        out["dow"] = out["ts"].dt.weekday
+        return out
 
     def main():
         try:
-            jobs = {m["metric"]["job"] for m in prom_query("svc:qps:rate1m")}
+            r = requests.get(f"{PROM_URL}/api/v1/series", params={"match[]": "svc:qps:rate1m"}, timeout=10)
+            r.raise_for_status()
+            jobs = {m["job"] for m in r.json()["data"] if "job" in m}
             if not jobs:
-                print("[WARN] No services discovered from svc:qps:rate1m"); return
+                print("[WARN] No services discovered from svc:qps:rate1m")
+                return
 
-            rows = [collect(svc) for svc in sorted(jobs)]
-            df = pd.DataFrame(rows)
+            dfs = [collect_series(svc) for svc in sorted(jobs)]
+            dfs = [d for d in dfs if not d.empty]
+            if not dfs:
+                print("[WARN] No valid data collected")
+                return
 
-            df["service"] = df["service"].astype(str)
-            df["ts"] = pd.to_datetime(df["ts"]).astype(str)
+            df = pd.concat(dfs, ignore_index=True)
             df = df.astype({
                 "rps_1m": "float64",
                 "latency_p95_ms": "float64",
@@ -101,9 +128,10 @@ data:
                     index=False,
                     engine="pyarrow",
                     storage_options=storage_opts,
-                    use_dictionary=False
+                    use_dictionary=False,
                 )
-                print(f"[OK] wrote {path} (tz={TZ_NAME})")
+                print(f"[OK] wrote {path} (rows={len(sub)}, tz={TZ_NAME})")
+
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)
