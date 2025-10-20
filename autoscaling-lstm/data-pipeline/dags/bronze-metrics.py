@@ -7,7 +7,7 @@ with DAG(
         dag_id="bronze_metrics_dag",
         description="Bronze layer: dump raw metrics from Prometheus → MinIO (S3)",
         start_date=datetime(2025, 10, 18),
-        schedule="*/5 * * * *",
+        schedule=None,
         catchup=False,
         max_active_runs=1,
         tags=["bronze", "metrics"],
