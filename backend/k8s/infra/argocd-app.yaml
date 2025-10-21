@@ -1,0 +1,62 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ecommerce-apps
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git
+    targetRevision: phuongdung
+    path: backend/k8s/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: apps
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ecommerce-infra
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git
+    targetRevision: phuongdung
+    path: backend/k8s/infra
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: infra
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ecommerce-monitoring
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/PDung-DAnh-Java-Project/E-commerce_Web.git
+    targetRevision: phuongdung
+    path: backend/k8s/monitoring
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -4,7 +4,7 @@ CREATE DATABASE userdb;
 CREATE DATABASE paymentdb;
 ## Use PostgreSQL to create database for product-service
 CREATE DATABASE productdb; 
-## Use MongoDB to create database for order-service, chat-service
+## Use MongoDB to create database for order-service
 
 
 ## 2. Run all service
@@ -40,7 +40,4 @@ cd .\payment-service
 .\mvnw clean install
 .\mvnw spring-boot:run
 
-## 2.7. Run chat-service
-cd .\chat-service
-mvnd clean install
-mvnd spring-boot:run
+## 2.7. (removed) chat-service has been removed from this repository

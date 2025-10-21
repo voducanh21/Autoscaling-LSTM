@@ -4,7 +4,6 @@ import { RouterModule, Routes } from '@angular/router';
 import { HomeComponent } from './pages/home/home.component';
 import { CartComponent } from './pages/cart/cart.component';
 import { OrderComponent } from './pages/order/order.component';
-import { ChatComponent } from './pages/chat/chat.component';
 
 const routes: Routes = [
   {
@@ -34,10 +33,6 @@ const routes: Routes = [
     loadChildren: 
     () => import('./authentication/authentication.module')
     .then(m => m.AuthenticationModule) 
-  },
-  {
-    path: 'chat',
-    component: ChatComponent
   },
 ];
 

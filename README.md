@@ -10,7 +10,7 @@ A comprehensive e-commerce application built with microservices architecture usi
 - **Product Service**: Manages products, categories, and inventory
 - **Order Service**: Processes orders and manages shopping cart functionality
 - **Payment Service**: Handles payment processing and transactions
-- **Chat Service**: Provides customer support chat functionality
+<!-- Chat service removed from this repository -->
 
 ### Frontend
 - **Angular**: Single Page Application with Material Design components
@@ -19,7 +19,7 @@ A comprehensive e-commerce application built with microservices architecture usi
 ### Databases
 - **MySQL**: Used by Authentication Service and Payment Service
 - **PostgreSQL**: Used by Product Service for product data
-- **MongoDB**: Used by Order Service and Chat Service
+- **MongoDB**: Used by Order Service
 
 ## 🚀 Getting Started
 
@@ -82,11 +82,7 @@ cd backend/payment-service
 ```
 
 #### Chat Service
-```bash
-cd backend/chat-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
+This project no longer includes a chat service.
 
 ### 3. Running Frontend
 
@@ -188,9 +184,71 @@ After running the services, API documentation is available at:
 - Product Service: `http://localhost:8082/swagger-ui.html`
 - Order Service: `http://localhost:8083/swagger-ui.html`
 - Payment Service: `http://localhost:8084/swagger-ui.html`
-- Chat Service: `http://localhost:8085/swagger-ui.html`
+<!-- Chat Service API documentation removed -->
 
-## 🗂️ Project Structure
+## � CI/CD Pipeline
+
+This project includes a complete CI/CD pipeline using Jenkins:
+
+### Jenkins Pipeline Features
+- ✅ Automated builds for all microservices
+- ✅ SonarQube code quality analysis
+- ✅ Trivy security scanning for Docker images
+- ✅ Automatic Docker image builds and pushes
+- ✅ Kubernetes manifest updates
+- ✅ GitOps integration with ArgoCD
+
+### Quick Start CI/CD
+
+#### 1. Start Development Environment
+```bash
+# Start databases and monitoring stack
+cd backend
+docker-compose up -d
+
+# Access Monitoring
+# Grafana:    http://localhost:3000
+# Prometheus: http://localhost:9090
+```
+
+#### 2. Jenkins Setup
+```groovy
+// Configure Jenkins Credentials
+- dockerhub-credentials (Username/Password)
+- github-token (Secret text)
+- sonar-token (Secret text)
+
+// Create Pipeline Job
+Pipeline from SCM → backend/Jenkinsfile
+```
+
+#### 3. Trigger Build
+```bash
+git commit -m "feat: new feature"
+git push  # Automatically triggers Jenkins build
+
+# Or skip CI
+git commit -m "docs: update [skip-ci]"
+git push
+```
+
+### Monitoring Stack
+- **Prometheus**: Metrics collection
+- **Grafana**: Visualization dashboards
+- **Loki**: Log aggregation
+- **Tempo**: Distributed tracing
+
+### Kubernetes Deployment with ArgoCD
+```bash
+# Deploy infrastructure and apps
+kubectl apply -f backend/k8s/infra/
+kubectl apply -f backend/k8s/apps/
+
+# Setup ArgoCD for GitOps
+kubectl apply -f backend/k8s/infra/argocd-app.yaml
+```
+
+## �🗂️ Project Structure
 
 ```
 E-commerce_Web/
@@ -200,10 +258,12 @@ E-commerce_Web/
 │   ├── product-service/      # Product management
 │   ├── order-service/        # Order processing
 │   ├── payment-service/      # Payment processing
-│   ├── chat-service/         # Customer support chat
-│   ├── docker/              # Database initialization scripts
+│   ├── docker/              # Database initialization & monitoring configs
 │   ├── k8s/                 # Kubernetes deployment files
-│   └── docker-compose.yml   # Docker services configuration
+│   │   ├── apps/            # Application deployments
+│   │   └── infra/           # Infrastructure (DBs, monitoring, ArgoCD)
+│   ├── docker-compose.yml   # Development environment
+│   └── Jenkinsfile          # CI/CD Pipeline
 ├── frontend/                 # Angular application
 │   ├── src/app/
 │   │   ├── authentication/   # Auth components
@@ -211,7 +271,42 @@ E-commerce_Web/
 │   │   ├── pages/           # Page components
 │   │   └── services/        # Angular services
 │   └── ...
+├── scripts/                  # Automation scripts
+│   ├── deploy-k8s.sh        # Deploy to Kubernetes
+│   ├── cleanup-k8s.sh       # Cleanup resources
+│   ├── start-dev.sh         # Start development
+│   └── build-images.sh      # Build Docker images
+├── docker-compose.full.yml   # Full stack deployment
+├── Makefile                  # Task automation
+├── .env.example             # Environment variables template
 └── README.md               # This file
+```
+
+## 🛠️ Useful Commands
+
+### Make Commands (Task Automation)
+```bash
+make help              # Show all available commands
+make dev-up            # Start development environment
+make dev-down          # Stop development environment
+make build-all         # Build all services
+make deploy-k8s        # Deploy to Kubernetes
+make k8s-status        # Check Kubernetes status
+make cleanup-k8s       # Cleanup Kubernetes resources
+```
+
+### Manual Commands
+```bash
+# Build single service
+cd backend/api-gateway
+mvn clean package -DskipTests
+docker build -t username/api-gateway:tag .
+
+# Deploy to Kubernetes
+bash scripts/deploy-k8s.sh
+
+# Cleanup
+bash scripts/cleanup-k8s.sh
 ```
 
 ## 🤝 Contributing

@@ -9,4 +9,3 @@ data:
   PAYMENT_SERVICE_URL: "http://payment-service.apps.svc.cluster.local:8082"
   ORDER_SERVICE_URL: "http://order-service.apps.svc.cluster.local:8083"
   AUTHENTICATION_SERVICE_URL: "http://authentication-service.apps.svc.cluster.local:8084"
-  CHAT_SERVICE_URL: "http://chat-service.apps.svc.cluster.local:8085"

@@ -35,11 +35,7 @@ spring:
         - id: AUTHENTICATION-SERVICE
           uri: ${AUTHENTICATION_SERVICE_URL:http://authentication-service.apps.svc.cluster.local:8084}
           predicates: [ Path=/api/auth/** ]
-
-        - id: CHAT-SERVICE
-          uri: ${CHAT_SERVICE_URL:http://chat-service.apps.svc.cluster.local:8085}
-          predicates: [ Path=/api/chat/** ]
-
+          
 server:
   port: 8888
 
