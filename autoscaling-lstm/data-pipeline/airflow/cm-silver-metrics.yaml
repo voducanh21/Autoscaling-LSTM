@@ -5,6 +5,7 @@ metadata:
   namespace: airflow
 data:
   silver_builder.py: |
+    # 🥈 Silver Layer — build rolling + lag features from Bronze (split by date)
     import os, sys, json
     import pandas as pd
     import s3fs
@@ -20,8 +21,8 @@ data:
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
     PAST_HOURS = int(os.getenv("PAST_HOURS", "48"))
-    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[1,3]"))      # mềm hơn
-    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3]"))      # ngắn hơn
+    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[3,5,10]"))
+    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3,5,10]"))
 
     try:
         TZ = ZoneInfo(TZ_NAME)
@@ -34,97 +35,102 @@ data:
         "client_kwargs": {"endpoint_url": S3_ENDPOINT}
     }
 
+    # --- STEP 1: READ BRONZE ---
     def read_bronze():
-        now = datetime.now(TZ)
-        dates = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range((PAST_HOURS // 24) + 2)}
+        fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
+                               client_kwargs={"endpoint_url": S3_ENDPOINT})
+        prefix = f"{BUCKET}/{BRONZE_PREF}/"
+        all_paths = fs.glob(prefix + "date=*/service=*/part-*.parquet")
+        if not all_paths:
+            raise RuntimeError("No bronze parquet files found")
+
+        dates = sorted({p.split("/date=")[1].split("/")[0] for p in all_paths})
+        print(f"[INFO] Found bronze dates with data: {dates}")
+
         dfs = []
-        fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs={"endpoint_url": S3_ENDPOINT})
-
-        for d in sorted(dates):
-            base = f"{BUCKET}/{BRONZE_PREF}/date={d}/"
-            try:
-                files = fs.glob(base + "service=*/part-*.parquet")
-                if not files:
-                    print(f"[WARN] No parquet files under {base}")
-                    continue
-
-                for f in files:
-                    try:
-                        with fs.open(f, "rb") as fobj:
-                            table = pq.read_table(fobj, read_dictionary=[])
-                            if "service" in table.column_names:
-                                table = table.set_column(
-                                    table.schema.get_field_index("service"),
-                                    "service",
-                                    table["service"].cast("string")
-                                )
-                            df = table.to_pandas()
-                            dfs.append(df)
-                    except Exception as e:
-                        print(f"[WARN] Skip {f}: {e}")
-
-                print(f"[INFO] Loaded {len(files)} parquet files from {base}")
-
-            except Exception as e:
-                print(f"[WARN] Error listing {base}: {e}")
+        for d in dates:
+            base = f"{prefix}date={d}/"
+            files = fs.glob(base + "service=*/part-*.parquet")
+            if not files:
+                continue
+            for f in files:
+                try:
+                    with fs.open(f, "rb") as fobj:
+                        table = pq.read_table(fobj)
+                        df = table.to_pandas()
+                        dfs.append(df)
+                except Exception as e:
+                    print(f"[WARN] Skip {f}: {e}")
+            print(f"[INFO] Loaded {len(files)} parquet files from {base}")
 
         if not dfs:
-            raise RuntimeError("No bronze data found")
-
+            raise RuntimeError("No bronze data found after filtering")
         return pd.concat(dfs, ignore_index=True)
 
+    # --- STEP 2: CLEAN SCHEMA ---
     def enforce_schema(df):
         df = df.copy()
         df["service"] = df["service"].astype(str)
-        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
-        cols_float = ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]
-        for c in cols_float:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+        for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["hour"] = pd.to_numeric(df["hour"], errors="coerce").astype("Int64")
-        df["dow"] = pd.to_numeric(df["dow"], errors="coerce").astype("Int64")
         df = df.dropna(subset=["ts", "service"])
+        df["hour"] = df["ts"].dt.tz_convert(TZ).dt.hour
+        df["dow"] = df["ts"].dt.tz_convert(TZ).dt.weekday
         return df.sort_values("ts")
 
+    # --- STEP 3: ADD FEATURES ---
     def add_features(g):
-        g = g.set_index("ts").asfreq("min")  # thay 'T' → 'min'
+        g = g.drop_duplicates(subset=["ts"])
+        g = g.set_index("ts")
+        g = g.asfreq("min")
         for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
             g[c] = g[c].ffill()
+
         for w in ROLL_LIST:
             g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}min").mean()
             g[f"p95_roll_mean_{w}m"] = g["latency_p95_ms"].rolling(f"{w}min").mean()
+
         for l in LAG_LIST:
             g[f"rps_lag_{l}m"] = g["rps_1m"].shift(l)
             g[f"p95_lag_{l}m"] = g["latency_p95_ms"].shift(l)
             g[f"cpu_lag_{l}m"] = g["cpu_cores_1m"].shift(l)
             g[f"mem_lag_{l}m"] = g["mem_bytes"].shift(l)
-        idx = g.index.tz_convert(TZ) if g.index.tzinfo else g.index.tz_localize(TZ)
-        g["hour"] = idx.hour
-        g["dow"] = idx.weekday
+
+        g.index = g.index.tz_convert(TZ)
+        g["hour"] = g.index.hour
+        g["dow"] = g.index.weekday
         return g.reset_index().rename(columns={"index": "ts"})
 
+    # --- STEP 4: WRITE SILVER ---
     def write_silver(df):
         if df.empty:
             print("[WARN] No rows to write.")
             return
         df["date"] = df["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
-        now = datetime.now(TZ)
+        now = datetime.now(timezone.utc)
         part = int(now.timestamp())
         for svc, sub in df.groupby("service"):
             for d, sub2 in sub.groupby("date"):
                 path = f"s3://{BUCKET}/{SILVER_PREF}/date={d}/service={svc}/part-{part}.parquet"
                 sub2.drop(columns=["date"]).to_parquet(
                     path, index=False, engine="pyarrow",
-                    storage_options=storage_opts, use_dictionary=False
-                )
-                print(f"[OK] wrote {path}")
+                    storage_options=storage_opts, use_dictionary=False)
+                print(f"[OK] wrote {path} ({len(sub2)} rows)")
 
+    # --- MAIN ---
     def main():
         try:
             raw = read_bronze()
             raw = enforce_schema(raw)
-            out = raw.groupby("service", group_keys=False).apply(add_features)
-            # Không dropna để giữ lại dữ liệu ít
-            out = out.reset_index(drop=True)
+            # Phân chia xử lý riêng theo từng ngày timestamp
+            raw["date"] = raw["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
+            results = []
+            for d, part in raw.groupby("date"):
+                print(f"[INFO] Processing date {d} ({len(part)} rows)")
+                sub = part.groupby("service", group_keys=False).apply(add_features)
+                results.append(sub)
+            out = pd.concat(results, ignore_index=True)
             print(f"[INFO] Output rows: {len(out)}")
             write_silver(out)
         except Exception as e:
