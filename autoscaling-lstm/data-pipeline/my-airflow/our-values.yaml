@@ -12,6 +12,13 @@ mysql:
       enabled: true
       size: 2Gi
       storageClass: nfs-rwx
+    resources:            # thêm CPU/memory
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 1200m
+        memory: 1Gi
 
 nfs:
   enabled: true
@@ -58,6 +65,21 @@ airflow:
   config:
     core:
       load_examples: "False"
+
+    kubernetes:
+      # 🧩 Phân phối DAG pod đều trên các node
+      affinity: |
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - airflow
+                topologyKey: kubernetes.io/hostname
 
   extraEnv: |
     - name: AIRFLOW__CORE__LOAD_EXAMPLES
@@ -107,5 +129,3 @@ airflow:
       periodSeconds: 20
       timeoutSeconds: 10
       failureThreshold: 5
-
-
