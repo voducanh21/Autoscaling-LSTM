@@ -92,7 +92,7 @@ airflow:
       httpGet:
         path: /api/v2/version
         port: 8080
-      initialDelaySeconds: 180
+      initialDelaySeconds: 220
       periodSeconds: 10
       failureThreshold: 15
       timeoutSeconds: 10
