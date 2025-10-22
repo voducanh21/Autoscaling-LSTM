@@ -5,12 +5,12 @@ metadata:
   namespace: airflow
 data:
   silver_builder.py: |
-    # 🥈 Silver Layer — build rolling + lag features from Bronze (split by date)
+    # 🥈 Silver Layer — build rolling + lag features from Bronze (global last_processed.txt in Silver)
     import os, sys, json
     import pandas as pd
     import s3fs
     import pyarrow.parquet as pq
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
     BUCKET = os.getenv("S3_BUCKET", "datalake")
@@ -20,7 +20,6 @@ data:
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
-    PAST_HOURS = int(os.getenv("PAST_HOURS", "48"))
     ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[3,5,10]"))
     LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3,5,10]"))
 
@@ -32,40 +31,65 @@ data:
     storage_opts = {
         "key": AWS_KEY,
         "secret": AWS_SECRET,
-        "client_kwargs": {"endpoint_url": S3_ENDPOINT}
+        "client_kwargs": {"endpoint_url": S3_ENDPOINT},
     }
 
-    # --- STEP 1: READ BRONZE ---
-    def read_bronze():
-        fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
-                               client_kwargs={"endpoint_url": S3_ENDPOINT})
-        prefix = f"{BUCKET}/{BRONZE_PREF}/"
-        all_paths = fs.glob(prefix + "date=*/service=*/part-*.parquet")
-        if not all_paths:
-            raise RuntimeError("No bronze parquet files found")
+    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
+                           client_kwargs={"endpoint_url": S3_ENDPOINT})
 
-        dates = sorted({p.split("/date=")[1].split("/")[0] for p in all_paths})
-        print(f"[INFO] Found bronze dates with data: {dates}")
+    # --- STEP 1: READ BRONZE (only files newer than last_processed.txt in Silver) ---
+    def read_bronze():
+        prefix = f"{BUCKET}/{BRONZE_PREF}/"
+        ts_file = f"{BUCKET}/{SILVER_PREF}/last_processed.txt"
+
+        last_ts = None
+        if fs.exists(ts_file):
+            with fs.open(ts_file, "r") as f:
+                txt = f.read().strip()
+                if txt:
+                    last_ts = datetime.fromisoformat(txt)
+                    print(f"[INFO] Last processed timestamp: {last_ts}")
+
+        svc_paths = fs.glob(prefix + "date=*/service=*/")
+        if not svc_paths:
+            raise RuntimeError("No bronze folders found")
 
         dfs = []
-        for d in dates:
-            base = f"{prefix}date={d}/"
-            files = fs.glob(base + "service=*/part-*.parquet")
-            if not files:
-                continue
-            for f in files:
-                try:
+        latest_seen = None
+
+        for path in svc_paths:
+            try:
+                d = path.split("/date=")[1].split("/")[0]
+                svc = path.split("/service=")[1].split("/")[0]
+
+                files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
+                new_files = []
+                for fpath in files:
+                    info = fs.info(fpath)
+                    if not last_ts or info["LastModified"] > last_ts:
+                        new_files.append(fpath)
+
+                if not new_files:
+                    continue
+
+                for f in new_files:
                     with fs.open(f, "rb") as fobj:
                         table = pq.read_table(fobj)
                         df = table.to_pandas()
                         dfs.append(df)
-                except Exception as e:
-                    print(f"[WARN] Skip {f}: {e}")
-            print(f"[INFO] Loaded {len(files)} parquet files from {base}")
+
+                latest_ts = max(fs.info(f)["LastModified"] for f in new_files)
+                if not latest_seen or latest_ts > latest_seen:
+                    latest_seen = latest_ts
+
+                print(f"[INFO] Loaded {len(new_files)} new parquet files for {svc} ({d})")
+
+            except Exception as e:
+                print(f"[WARN] Skip {path}: {e}")
 
         if not dfs:
-            raise RuntimeError("No bronze data found after filtering")
-        return pd.concat(dfs, ignore_index=True)
+            raise RuntimeError("No new bronze data found")
+        return pd.concat(dfs, ignore_index=True), latest_seen
 
     # --- STEP 2: CLEAN SCHEMA ---
     def enforce_schema(df):
@@ -82,8 +106,7 @@ data:
     # --- STEP 3: ADD FEATURES ---
     def add_features(g):
         g = g.drop_duplicates(subset=["ts"])
-        g = g.set_index("ts")
-        g = g.asfreq("min")
+        g = g.set_index("ts").asfreq("min")
         for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
             g[c] = g[c].ffill()
 
@@ -102,37 +125,52 @@ data:
         g["dow"] = g.index.weekday
         return g.reset_index().rename(columns={"index": "ts"})
 
-    # --- STEP 4: WRITE SILVER ---
-    def write_silver(df):
+    # --- STEP 4: WRITE SILVER + update global last_processed.txt ---
+    def write_silver(df, latest_ts):
         if df.empty:
             print("[WARN] No rows to write.")
             return
         df["date"] = df["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
         now = datetime.now(timezone.utc)
         part = int(now.timestamp())
+
         for svc, sub in df.groupby("service"):
             for d, sub2 in sub.groupby("date"):
-                path = f"s3://{BUCKET}/{SILVER_PREF}/date={d}/service={svc}/part-{part}.parquet"
+                silver_path = f"s3://{BUCKET}/{SILVER_PREF}/date={d}/service={svc}/part-{part}.parquet"
                 sub2.drop(columns=["date"]).to_parquet(
-                    path, index=False, engine="pyarrow",
-                    storage_options=storage_opts, use_dictionary=False)
-                print(f"[OK] wrote {path} ({len(sub2)} rows)")
+                    silver_path,
+                    index=False,
+                    engine="pyarrow",
+                    storage_options=storage_opts,
+                    use_dictionary=False,
+                )
+                print(f"[OK] wrote {silver_path} ({len(sub2)} rows)")
+
+        try:
+            with fs.open(f"{BUCKET}/{SILVER_PREF}/last_processed.txt", "w") as f:
+                f.write(latest_ts.isoformat())
+            print(f"[TAG] Updated silver/last_processed.txt → {latest_ts}")
+        except Exception as e:
+            print(f"[WARN] Cannot update silver marker: {e}")
 
     # --- MAIN ---
     def main():
         try:
-            raw = read_bronze()
+            raw, latest_ts = read_bronze()
             raw = enforce_schema(raw)
-            # Phân chia xử lý riêng theo từng ngày timestamp
             raw["date"] = raw["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
+
             results = []
             for d, part in raw.groupby("date"):
                 print(f"[INFO] Processing date {d} ({len(part)} rows)")
                 sub = part.groupby("service", group_keys=False).apply(add_features)
                 results.append(sub)
+
             out = pd.concat(results, ignore_index=True)
             print(f"[INFO] Output rows: {len(out)}")
-            write_silver(out)
+
+            write_silver(out, latest_ts)
+
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)

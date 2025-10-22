@@ -5,7 +5,7 @@ metadata:
   namespace: airflow
 data:
   gold_aggregator.py: |
-    # 🥇 Gold Layer (aligned with Silver)
+    # 🥇 Gold Layer — aggregate from Silver using gold/last_processed.txt
     import os, sys
     import pandas as pd
     import s3fs
@@ -32,36 +32,65 @@ data:
         "client_kwargs": {"endpoint_url": S3_ENDPOINT}
     }
 
-    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs={"endpoint_url": S3_ENDPOINT})
+    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
+                           client_kwargs={"endpoint_url": S3_ENDPOINT})
 
+    # --- STEP 1: Read Silver (only new files newer than gold/last_processed.txt) ---
     def read_silver():
-        files = fs.glob(f"{BUCKET}/{SILVER_PREF}/**/*.parquet")
-        if not files:
-            print("[WARN] No silver data found")
-            return pd.DataFrame()
+        prefix = f"{BUCKET}/{SILVER_PREF}/"
+        svc_paths = fs.glob(prefix + "date=*/service=*/")
+        if not svc_paths:
+            print("[WARN] No silver folders found")
+            return pd.DataFrame(), None
+
+        # read gold marker once
+        gold_marker = f"{BUCKET}/{GOLD_PREF}/last_processed.txt"
+        last_ts = None
+        if fs.exists(gold_marker):
+            with fs.open(gold_marker, "r") as f:
+                txt = f.read().strip()
+                if txt:
+                    last_ts = datetime.fromisoformat(txt)
+                    print(f"[INFO] gold/last_processed.txt = {last_ts}")
 
         dfs = []
-        for f in files:
+        latest_seen = None
+
+        for path in svc_paths:
             try:
-                with fs.open(f, "rb") as fobj:
-                    table = pq.read_table(fobj, read_dictionary=[])
-                    if "service" in table.column_names:
-                        table = table.set_column(
-                            table.schema.get_field_index("service"),
-                            "service",
-                            table["service"].cast("string")
-                        )
-                    df = table.to_pandas()
-                    dfs.append(df)
+                d = path.split("/date=")[1].split("/")[0]
+                svc = path.split("/service=")[1].split("/")[0]
+                files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
+                new_files = []
+                for fpath in files:
+                    info = fs.info(fpath)
+                    if not last_ts or info["LastModified"] > last_ts:
+                        new_files.append(fpath)
+
+                if not new_files:
+                    print(f"[SKIP] {d}/{svc} — no new silver parquet since {last_ts}")
+                    continue
+
+                for f in new_files:
+                    with fs.open(f, "rb") as fobj:
+                        table = pq.read_table(fobj)
+                        df = table.to_pandas()
+                        dfs.append(df)
+
+                latest_ts = max(fs.info(f)["LastModified"] for f in new_files)
+                if not latest_seen or latest_ts > latest_seen:
+                    latest_seen = latest_ts
+
+                print(f"[INFO] Loaded {len(new_files)} new silver files for {svc} ({d})")
+
             except Exception as e:
-                print(f"[WARN] Skip {f}: {e}")
+                print(f"[WARN] Skip {path}: {e}")
 
         if not dfs:
-            print("[WARN] No valid silver files")
-            return pd.DataFrame()
+            raise RuntimeError("No new silver data found")
+        return pd.concat(dfs, ignore_index=True), latest_seen
 
-        return pd.concat(dfs, ignore_index=True)
-
+    # --- STEP 2: Clean schema ---
     def enforce_schema(df):
         df = df.copy()
         df["service"] = df["service"].astype(str)
@@ -71,6 +100,7 @@ data:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         return df.dropna(subset=["service", "hour", "dow"])
 
+    # --- STEP 3: Aggregate ---
     def aggregate(df):
         agg = (
             df.groupby(["service", "hour", "dow"], dropna=True)
@@ -84,7 +114,8 @@ data:
         )
         return agg
 
-    def write_gold(df):
+    # --- STEP 4: Write Gold + Update marker ---
+    def write_gold(df, latest_ts):
         if df.empty:
             print("[WARN] No data to write")
             return
@@ -100,15 +131,25 @@ data:
         )
         print(f"[OK] wrote {path}")
 
+        # update gold marker
+        try:
+            with fs.open(f"{BUCKET}/{GOLD_PREF}/last_processed.txt", "w") as f:
+                f.write(latest_ts.isoformat())
+            print(f"[TAG] Updated gold/last_processed.txt → {latest_ts}")
+        except Exception as e:
+            print(f"[WARN] Cannot update gold marker: {e}")
+
+    # --- MAIN ---
     def main():
         try:
-            df = read_silver()
+            df, latest_ts = read_silver()
             if df.empty:
+                print("[INFO] No new silver data found — skipping aggregation.")
                 return
             df = enforce_schema(df)
             out = aggregate(df)
             print(f"[INFO] Aggregated {len(out)} rows")
-            write_gold(out)
+            write_gold(out, latest_ts)
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)
