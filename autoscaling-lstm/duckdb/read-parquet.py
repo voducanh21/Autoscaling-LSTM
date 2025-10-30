@@ -10,7 +10,7 @@ fs = s3fs.S3FileSystem(
 )
 
 # ===== Đường dẫn thư mục Silver cụ thể =====
-prefix = "datalake/silver/metrics/date=2025-10-30/service=api-gateway"
+prefix = "datalake/silver/metrics/date=2025-10-30/service=product-service"
 
 # ===== Lấy danh sách file .parquet =====
 files = fs.ls(prefix)

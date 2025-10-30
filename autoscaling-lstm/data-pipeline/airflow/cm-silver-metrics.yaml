@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: silver-metrics-script
-  namespace: airflow
+  namespace: cronjob
 data:
   silver_builder.py: |
     # 🥈 Silver Layer — build rolling + lag features from Bronze (reads last 30 minutes, no state file)
@@ -10,6 +10,7 @@ data:
     import pandas as pd
     import s3fs
     import pyarrow.parquet as pq
+    import numpy as np
     from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
@@ -47,7 +48,6 @@ data:
         min_time = now - timedelta(minutes=30)
         print(f"[INFO] Collecting Bronze files newer than {min_time.astimezone(TZ)} (local TZ={TZ_NAME})")
 
-
         svc_paths = fs.glob(prefix + "date=*/service=*/")
         if not svc_paths:
             raise RuntimeError("No bronze folders found")
@@ -58,7 +58,6 @@ data:
             try:
                 d = path.split("/date=")[1].split("/")[0]
                 svc = path.split("/service=")[1].split("/")[0]
-
                 files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
                 recent = [f for f in files if fs.info(f)["LastModified"] >= min_time]
                 if not recent:
@@ -99,22 +98,31 @@ data:
     def add_features(g):
         g = g.drop_duplicates(subset=["ts"])
         g = g.set_index("ts").asfreq("min")
-        for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
-            g[c] = g[c].ffill()
 
+        # Fill missing base metrics
+        for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
+            g[c] = g[c].ffill().bfill()
+
+        # Rolling means
         for w in ROLL_LIST:
             g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}min").mean()
             g[f"p95_roll_mean_{w}m"] = g["latency_p95_ms"].rolling(f"{w}min").mean()
 
+        # Lag features
         for l in LAG_LIST:
             g[f"rps_lag_{l}m"] = g["rps_1m"].shift(l)
             g[f"p95_lag_{l}m"] = g["latency_p95_ms"].shift(l)
             g[f"cpu_lag_{l}m"] = g["cpu_cores_1m"].shift(l)
             g[f"mem_lag_{l}m"] = g["mem_bytes"].shift(l)
 
+        # === Clean NaN/Inf (critical fix) ===
+        g = g.replace([np.inf, -np.inf], np.nan)
+        g = g.fillna(method="bfill").fillna(method="ffill")
+
         g.index = g.index.tz_convert(TZ)
         g["hour"] = g.index.hour
         g["dow"] = g.index.weekday
+
         return g.reset_index().rename(columns={"index": "ts"})
 
     # --- STEP 4: WRITE SILVER ---

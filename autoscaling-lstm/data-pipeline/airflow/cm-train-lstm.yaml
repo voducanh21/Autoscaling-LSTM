@@ -72,6 +72,14 @@ data:
 
     # === STEP 2: Prepare features ===
     feature_cols = [c for c in df.columns if c not in ["ts", "service"]]
+
+    # --- Clean NaN rows before training ---
+    before = len(df)
+    df = df.dropna().reset_index(drop=True)
+    after = len(df)
+    print(f"[CLEAN] Dropped {before - after} rows containing NaN (remaining: {after})")
+
+    # --- Scale features ---
     from sklearn.preprocessing import MinMaxScaler
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df[feature_cols])
