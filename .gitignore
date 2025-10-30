@@ -131,3 +131,8 @@ autoscaling-lstm/data-pipeline/airflow/train-lstm.tar
 autoscaling-lstm/default-values.yaml
 kubectl
 minikube-linux-amd64
+
+
+.env
+.env.local
+.env.*.local
