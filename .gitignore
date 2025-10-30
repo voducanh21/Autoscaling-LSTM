@@ -136,3 +136,5 @@ minikube-linux-amd64
 .env
 .env.local
 .env.*.local
+venv/
+**/venv/

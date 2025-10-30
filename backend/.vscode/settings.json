@@ -1,6 +1,0 @@
-{
-    "java.compile.nullAnalysis.mode": "automatic",
-    "java.dependency.syncWithFolderExplorer": false,
-    "java.project.explorer.showNonJavaResources": false,
-    "java.configuration.updateBuildConfiguration": "interactive"
-}

@@ -2,15 +2,15 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: silver-metrics-script
-  namespace: cronjob
+  namespace: airflow
 data:
   silver_builder.py: |
-    # 🥈 Silver Layer — build rolling + lag features from Bronze (global last_processed.txt in Silver)
+    # 🥈 Silver Layer — build rolling + lag features from Bronze (reads last 30 minutes, no state file)
     import os, sys, json
     import pandas as pd
     import s3fs
     import pyarrow.parquet as pq
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
     BUCKET = os.getenv("S3_BUCKET", "datalake")
@@ -34,28 +34,25 @@ data:
         "client_kwargs": {"endpoint_url": S3_ENDPOINT},
     }
 
-    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
-                           client_kwargs={"endpoint_url": S3_ENDPOINT})
+    fs = s3fs.S3FileSystem(
+        key=AWS_KEY,
+        secret=AWS_SECRET,
+        client_kwargs={"endpoint_url": S3_ENDPOINT},
+    )
 
-    # --- STEP 1: READ BRONZE (only files newer than last_processed.txt in Silver) ---
+    # --- STEP 1: READ BRONZE (last 30 minutes) ---
     def read_bronze():
         prefix = f"{BUCKET}/{BRONZE_PREF}/"
-        ts_file = f"{BUCKET}/{SILVER_PREF}/last_processed.txt"
+        now = datetime.now(timezone.utc)
+        min_time = now - timedelta(minutes=30)
+        print(f"[INFO] Collecting Bronze files newer than {min_time.astimezone(TZ)} (local TZ={TZ_NAME})")
 
-        last_ts = None
-        if fs.exists(ts_file):
-            with fs.open(ts_file, "r") as f:
-                txt = f.read().strip()
-                if txt:
-                    last_ts = datetime.fromisoformat(txt)
-                    print(f"[INFO] Last processed timestamp: {last_ts}")
 
         svc_paths = fs.glob(prefix + "date=*/service=*/")
         if not svc_paths:
             raise RuntimeError("No bronze folders found")
 
-        dfs = []
-        latest_seen = None
+        dfs, latest_seen = [], None
 
         for path in svc_paths:
             try:
@@ -63,32 +60,27 @@ data:
                 svc = path.split("/service=")[1].split("/")[0]
 
                 files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
-                new_files = []
-                for fpath in files:
-                    info = fs.info(fpath)
-                    if not last_ts or info["LastModified"] > last_ts:
-                        new_files.append(fpath)
-
-                if not new_files:
+                recent = [f for f in files if fs.info(f)["LastModified"] >= min_time]
+                if not recent:
                     continue
 
-                for f in new_files:
-                    with fs.open(f, "rb") as fobj:
-                        table = pq.read_table(fobj)
-                        df = table.to_pandas()
+                for fpath in recent:
+                    with fs.open(fpath, "rb") as fobj:
+                        df = pq.read_table(fobj).to_pandas()
                         dfs.append(df)
 
-                latest_ts = max(fs.info(f)["LastModified"] for f in new_files)
+                latest_ts = max(fs.info(f)["LastModified"] for f in recent)
                 if not latest_seen or latest_ts > latest_seen:
                     latest_seen = latest_ts
 
-                print(f"[INFO] Loaded {len(new_files)} new parquet files for {svc} ({d})")
+                print(f"[INFO] Loaded {len(recent)} files for {svc} ({d})")
 
             except Exception as e:
                 print(f"[WARN] Skip {path}: {e}")
 
         if not dfs:
-            raise RuntimeError("No new bronze data found")
+            raise RuntimeError("No Bronze data found in recent 30-minute window")
+
         return pd.concat(dfs, ignore_index=True), latest_seen
 
     # --- STEP 2: CLEAN SCHEMA ---
@@ -125,8 +117,8 @@ data:
         g["dow"] = g.index.weekday
         return g.reset_index().rename(columns={"index": "ts"})
 
-    # --- STEP 4: WRITE SILVER + update global last_processed.txt ---
-    def write_silver(df, latest_ts):
+    # --- STEP 4: WRITE SILVER ---
+    def write_silver(df):
         if df.empty:
             print("[WARN] No rows to write.")
             return
@@ -146,17 +138,10 @@ data:
                 )
                 print(f"[OK] wrote {silver_path} ({len(sub2)} rows)")
 
-        try:
-            with fs.open(f"{BUCKET}/{SILVER_PREF}/last_processed.txt", "w") as f:
-                f.write(latest_ts.isoformat())
-            print(f"[TAG] Updated silver/last_processed.txt → {latest_ts}")
-        except Exception as e:
-            print(f"[WARN] Cannot update silver marker: {e}")
-
     # --- MAIN ---
     def main():
         try:
-            raw, latest_ts = read_bronze()
+            raw, _ = read_bronze()
             raw = enforce_schema(raw)
             raw["date"] = raw["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
 
@@ -169,7 +154,7 @@ data:
             out = pd.concat(results, ignore_index=True)
             print(f"[INFO] Output rows: {len(out)}")
 
-            write_silver(out, latest_ts)
+            write_silver(out)
 
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
