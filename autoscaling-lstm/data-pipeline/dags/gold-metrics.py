@@ -7,7 +7,7 @@ with DAG(
         dag_id="gold_metrics_dag",
         description="Gold layer: aggregate silver → gold",
         start_date=datetime(2025, 10, 18),
-        schedule=None,
+        schedule="*/13 * * * *",
         catchup=False,
         max_active_runs=1,
         tags=["gold", "metrics"],

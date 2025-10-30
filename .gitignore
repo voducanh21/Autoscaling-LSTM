@@ -125,3 +125,9 @@ secrets/
 !.gitkeep
 !.dockerignore
 !.editorconfig
+
+# Bỏ qua file tar và binary
+autoscaling-lstm/data-pipeline/airflow/train-lstm.tar
+autoscaling-lstm/default-values.yaml
+kubectl
+minikube-linux-amd64
