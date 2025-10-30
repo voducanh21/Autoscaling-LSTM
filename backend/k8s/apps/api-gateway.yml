@@ -18,7 +18,7 @@ spec:
     spec:
       # --- ADDED: ép pod chạy trên worker “apps/infra/monitoring”
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: api-gateway
           image: ducanhvo/new-api-gateway:latest

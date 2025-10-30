@@ -16,9 +16,8 @@ spec:
       labels:
         app: payment-service
     spec:
-      # --- ADDED: ép pod payment-service chạy trên worker role=app
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: payment-service
           image: ducanhvo/new-payment-service:latest  # thay đổi nếu dùng tag khác

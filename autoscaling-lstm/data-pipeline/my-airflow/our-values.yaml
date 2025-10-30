@@ -10,21 +10,21 @@ mysql:
   primary:
     persistence:
       enabled: true
-      size: 2Gi
+      size: 5Gi
       storageClass: nfs-rwx
     resources:            # thêm CPU/memory
       requests:
-        cpu: 500m
-        memory: 512Mi
-      limits:
-        cpu: 1200m
+        cpu: 800m
         memory: 1Gi
+      limits:
+        cpu: 2
+        memory: 2Gi
 
 nfs:
   enabled: true
   persistence:
     enabled: true
-    size: 2Gi
+    size: 5Gi
     storageClass: standard
 
   storageClass:
@@ -50,7 +50,7 @@ airflow:
   logs:
     persistence:
       enabled: true
-      size: 2Gi
+      size: 5Gi
       storageClassName: nfs-rwx
 
   data:
@@ -82,11 +82,11 @@ airflow:
   api:
     resources:
       requests:
-        cpu: 250m
-        memory: 512Mi
-      limits:
-        cpu: 1000m
+        cpu: 500m
         memory: 1Gi
+      limits:
+        cpu: 2
+        memory: 2Gi
 
     startupProbe:
       httpGet:

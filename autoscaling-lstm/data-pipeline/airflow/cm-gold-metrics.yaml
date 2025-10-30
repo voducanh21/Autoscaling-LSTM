@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gold-metrics-script
-  namespace: airflow
+  namespace: cronjob
 data:
   gold_aggregator.py: |
     # 🥇 Gold Layer — aggregate from Silver using gold/last_processed.txt

@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: Secret
 metadata:
@@ -6,7 +5,7 @@ metadata:
   namespace: infra
 type: Opaque
 data:
-  mysql_root_password: cm9vdA==  # base64 của "root"
+  mysql_root_password: cm9vdA==   # base64("root")
 
 ---
 apiVersion: v1
@@ -26,13 +25,12 @@ metadata:
   name: mysql-pvc
   namespace: infra
 spec:
-  # --- CHANGED: dùng StorageClass "standard-wffc" để PV gắn đúng node role=app
-  storageClassName: standard-wffc
+  storageClassName: standard
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi   # --- CHANGED: tăng từ 1Gi -> 5Gi (bạn có thể giữ 1Gi nếu muốn)
+      storage: 500Mi   # giảm xuống mức tối thiểu
 
 ---
 apiVersion: apps/v1
@@ -52,22 +50,20 @@ spec:
       labels:
         app: mysql
     spec:
-      # --- ADDED: ép MySQL chạy trên worker dành cho apps/infra/monitoring
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: mysql
-          image: mysql:8.3.0
+          image: mysql:8.3.0-oraclelinux8   # nhẹ hơn bản full Debian
           ports:
             - containerPort: 3306
-          # --- ADDED: baseline resources để scheduler ổn định
           resources:
             requests:
-              cpu: "200m"
-              memory: "512Mi"
+              cpu: "100m"
+              memory: "256Mi"
             limits:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "300m"
+              memory: "512Mi"
           env:
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
@@ -93,13 +89,9 @@ kind: Service
 metadata:
   name: mysql
   namespace: infra
-  labels:
-    app: mysql
 spec:
   selector:
     app: mysql
   ports:
     - port: 3306
       targetPort: 3306
-      protocol: TCP
-  type: ClusterIP

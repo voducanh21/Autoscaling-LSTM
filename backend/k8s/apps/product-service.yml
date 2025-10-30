@@ -16,9 +16,8 @@ spec:
       labels:
         app: product-service
     spec:
-      # --- ADDED: ép pod product-service chạy trên worker role=app
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: product-service
           image: ducanhvo/new-product-service:latest  # đổi tag nếu cần

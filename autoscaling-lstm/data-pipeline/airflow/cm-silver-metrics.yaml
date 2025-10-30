@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: silver-metrics-script
-  namespace: airflow
+  namespace: cronjob
 data:
   silver_builder.py: |
     # 🥈 Silver Layer — build rolling + lag features from Bronze (global last_processed.txt in Silver)

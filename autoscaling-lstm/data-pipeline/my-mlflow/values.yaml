@@ -1,0 +1,94 @@
+# SỬA LẠI FILE values.yaml ĐỂ KHẮC PHỤC LỖI SCHEMA
+
+## ========== 1. TẮT BASIC AUTHENTICATION ==========
+auth:
+  enabled: false
+
+---
+
+## ========== 2. CẤU HÌNH IMAGE MLFLOW ==========
+# KHẮC PHỤC LỖI: 'image: Additional property registry is not allowed'
+# Chart hiện tại đặt image repository và tag trực tiếp dưới khóa 'image'
+image:
+  repository: docker.io/mlflow/mlflow
+  tag: latest
+  pullPolicy: IfNotPresent
+
+---
+
+## ========== 3. CẤU HÌNH GLOBAL ==========
+global:
+  # Bỏ qua lỗi cảnh báo/lỗi kiểm tra Image (giữ nguyên)
+  security:
+    allowInsecureImages: true
+
+---
+
+## ========== 4. TẮT POSTGRESQL NỘI BỘ ==========
+postgresql:
+  enabled: false # KHẮC PHỤC LỖI: Chart hiện tại vẫn dùng khóa 'postgresql' để tắt database đi kèm
+
+---
+
+## ========== 5. CẤU HÌNH KẾT NỐI DATABASE NGOÀI ==========
+# KHẮC PHỤC LỖI: 'backendStore: Additional property postgresql is not allowed'
+# Chart hiện tại dùng khóa 'externalDatabase' để kết nối database ngoài
+externalDatabase:
+  type: "postgresql" # Chỉ định loại database ngoài
+  host: "mlflow-pg-postgresql"
+  user: mlflow
+  password: mlflowpass
+  database: mlflow_db
+  port: 5432 # Thêm port mặc định
+
+---
+
+## ========== 6. CẤU HÌNH MINIO NGOÀI (ARTIFACT STORE) ==========
+# KHẮC PHỤC LỖI: 'Additional property minio is not allowed' và 'Additional property extraEnv is not allowed'
+# Tắt Minio nội bộ và cấu hình môi trường nằm trong phần deployment/replicaSet
+
+# Tắt Minio nội bộ
+minio:
+  enabled: false # Vẫn giữ khóa này vì nó tắt Minio đi kèm
+
+# Cấu hình Artifact Root và Biến môi trường
+replicaSet:
+  # Cấu hình Artifact Root (vẫn sử dụng khóa này nếu Chart hỗ trợ)
+  defaultArtifactRoot: "s3://datalake/mlflow"
+
+  # KHẮC PHỤC LỖI: Đặt 'extraEnv' dưới 'replicaSet' (hoặc 'deployment')
+  extraEnv:
+    # Endpoint URL của Minio Server ngoài
+    - name: MLFLOW_S3_ENDPOINT_URL
+      value: http://minio.minio.svc.cluster.local:9000
+    # Yêu cầu Minio Client/AWS SDK dùng HTTP
+    - name: AWS_STORAGE_FORCE_HTTP
+      value: "true"
+    - name: MLFLOW_ALLOWED_HOSTS
+      value: "*"
+
+    # Lấy Access Key từ Kubernetes Secret (Sử dụng Secret bạn đã cung cấp)
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: minio-cred
+          key: AWS_ACCESS_KEY_ID
+    # Lấy Secret Key từ Kubernetes Secret
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: minio-cred
+          key: AWS_SECRET_ACCESS_KEY
+# Ghi chú: Nếu deployment/replicaSet không hoạt động, hãy thử đặt extraEnv ở cấp độ cao hơn (mlflow: extraEnv)
+# hoặc tham khảo tài liệu chính thức của chart đang dùng.
+
+---
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 5000          # service port (bên ngoài)
+  targetPort: 5000    # port bên trong container
+  containerPort: 5000
+  containerPortName: mlflow
+

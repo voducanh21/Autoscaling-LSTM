@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: train-lstm-cronjob
+  namespace: cronjob
+spec:
+  # Chạy mỗi 6 giờ (vẫn giữ nguyên)
+  schedule: "0 */6 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          # GÁN POD CHẠY TRÊN NODE k3n-m03
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+
+          # Không cần pull vì image đã có sẵn trên node
+          imagePullSecrets: []
+          restartPolicy: Never
+
+          containers:
+            - name: train-lstm
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: IfNotPresent
+
+              command: ["python"]
+              args: ["/app/train_lstm.py"]
+
+              env:
+                - name: AWS_STORAGE_FORCE_HTTP
+                  value: "true"
+
+                # --- CẤU HÌNH MINIO (Artifact Store) ---
+                - name: S3_ENDPOINT
+                  value: "http://minio.minio.svc.cluster.local:9000"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+
+                # --- CẤU HÌNH MLFLOW ---
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+
+                # --- THAM SỐ HUẤN LUYỆN ---
+                - name: TARGET
+                  value: "rps_1m"
+                - name: WINDOW_SIZE
+                  value: "30"
+                - name: EPOCHS
+                  value: "40"
+                - name: BATCH_SIZE
+                  value: "64"
+
+                # --- CREDENTIALS (MinIO) ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+              volumeMounts:
+                - name: train-script
+                  mountPath: /app
+
+          volumes:
+            - name: train-script
+              configMap:
+                name: train-lstm-script

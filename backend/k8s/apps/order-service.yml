@@ -16,9 +16,9 @@ spec:
       labels:
         app: order-service
     spec:
-      # --- ADDED: ép pod order-service chạy trên worker role=app
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
+
       containers:
         - name: order-service
           image: ducanhvo/new-order-service:latest  # đổi đúng tên image nếu cần

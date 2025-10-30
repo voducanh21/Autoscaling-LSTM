@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
     name: bronze-metrics-script
-    namespace: airflow
+    namespace: cronjob
 data:
     metrics_dumper.py: |
       # 🥉 Bronze Layer — sample 1 point per minute in last 5 minutes (≈5 points)

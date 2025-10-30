@@ -16,9 +16,8 @@ spec:
       labels:
         app: authentication-service
     spec:
-      # --- ADDED: ép pod chạy trên worker dành cho apps/infra/monitoring
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: authentication-service
           image: ducanhvo/new-authentication-service:latest

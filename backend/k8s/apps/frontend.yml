@@ -13,9 +13,8 @@ spec:
       labels:
         app: frontend
     spec:
-      # --- ADDED: ép pod frontend chạy trên worker role=app
       nodeSelector:
-        role: app
+        kubernetes.io/hostname: k3n-m02
       containers:
         - name: frontend
           image: ducanhvo/new-frontend:latest  # ← Cập nhật tag mới khi cần
