@@ -5,7 +5,7 @@ FROM python:3.11-slim
 RUN pip install --no-cache-dir \
     pandas pyarrow s3fs fsspec \
     tensorflow==2.16.1 \
-    scikit-learn mlflow tzdata joblib
+    scikit-learn mlflow tzdata joblib boto3
 
 # Tạo thư mục làm việc và sao chép script
 WORKDIR /app

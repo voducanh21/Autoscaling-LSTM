@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    meta.helm.sh/release-name: minio
+    meta.helm.sh/release-namespace: minio
+  creationTimestamp: "2025-10-29T08:35:00Z"
+  generation: 1
+  labels:
+    app: minio
+    app.kubernetes.io/managed-by: Helm
+    chart: minio-5.4.0
+    heritage: Helm
+    release: minio
+  name: minio
+  namespace: minio
+  resourceVersion: "90510"
+  uid: d7cd4cd4-71e2-4cac-a447-0d4f92835aec
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: minio
+      release: minio
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/config: d7787e9aef31fa7be8453cd19a250082a8f94ea127922a45ee713590591c43c7
+        checksum/secrets: 4e2a9f27f32863ed44da4aa1bd7cd7c661031d59bb7801270ce1fda15f769441
+      labels:
+        app: minio
+        release: minio
+      name: minio
+    spec:
+      containers:
+      - command:
+        - /bin/sh
+        - -ce
+        - /usr/bin/docker-entrypoint.sh minio server /export -S /etc/minio/certs/
+          --address :9000 --console-address :9001
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              key: rootUser
+              name: minio
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: rootPassword
+              name: minio
+        - name: MINIO_PROMETHEUS_AUTH_TYPE
+          value: public
+        image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+        imagePullPolicy: IfNotPresent
+        name: minio
+        ports:
+        - containerPort: 9000
+          name: http
+          protocol: TCP
+        - containerPort: 9001
+          name: http-console
+          protocol: TCP
+        resources:
+          limits:
+            memory: 256Mi
+          requests:
+            memory: 128Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp/credentials
+          name: minio-user
+          readOnly: true
+        - mountPath: /export
+          name: export
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: minio-sa
+      serviceAccountName: minio-sa
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: minio-user
+          secret:
+            secretName: minio
+        - name: export
+          persistentVolumeClaim:
+            claimName: minio-pvc
+status:
+  availableReplicas: 1
+  conditions:
+  - lastTransitionTime: "2025-10-29T08:35:00Z"
+    lastUpdateTime: "2025-10-29T08:35:01Z"
+    message: ReplicaSet "minio-5fd47bb44f" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  - lastTransitionTime: "2025-10-31T06:44:52Z"
+    lastUpdateTime: "2025-10-31T06:44:52Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  observedGeneration: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1

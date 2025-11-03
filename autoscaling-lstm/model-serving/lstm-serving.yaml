@@ -1,0 +1,138 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: model
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lstm-code
+  namespace: model
+data:
+  main.py: |
+    import os
+    import mlflow.pyfunc
+    from fastapi import FastAPI, HTTPException
+    import pandas as pd
+
+    app = FastAPI(title="LSTM Forecast Serving API")
+
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
+    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio.minio.svc.cluster.local:9000")
+    MODEL_RUN_ID = os.getenv("MODEL_RUN_ID", "01bc527ef040462abf4ec9de1c50c18e")
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
+
+    try:
+        model_uri = f"s3://datalake/mlflow/1/models/m-{MODEL_RUN_ID}/artifacts"
+        model = mlflow.pyfunc.load_model(model_uri)
+    except Exception as e:
+        raise RuntimeError(f"Cannot load model from MLflow/MinIO: {e}")
+
+    @app.get("/")
+    def root():
+        return {"message": f"LSTM model loaded from run_id: {MODEL_RUN_ID}"}
+
+    @app.post("/predict")
+    def predict(data: dict):
+        try:
+            df = pd.DataFrame(data["features"])
+            preds = model.predict(df)
+            return {"predictions": preds.tolist()}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lstm-serving
+  namespace: model
+  labels:
+    app: lstm-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lstm-serving
+  template:
+    metadata:
+      labels:
+        app: lstm-serving
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3n-m03
+      containers:
+        - name: lstm-serving
+          image: ducanhvo/lstm-serving:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.mlflow.svc.cluster.local:5000"
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: "http://minio.minio.svc.cluster.local:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-cred
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-cred
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: MODEL_STAGE
+              value: "Production"
+            - name: MODEL_RUN_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: lstm-config
+                  key: MODEL_RUN_ID
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: lstm-code
+              mountPath: /app/main.py
+              subPath: main.py
+      volumes:
+        - name: lstm-code
+          configMap:
+            name: lstm-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lstm-serving
+  namespace: model
+  labels:
+    app: lstm-serving
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: lstm-serving
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lstm-config
+  namespace: model
+data:
+  MODEL_RUN_ID: "01bc527ef040462abf4ec9de1c50c18e"

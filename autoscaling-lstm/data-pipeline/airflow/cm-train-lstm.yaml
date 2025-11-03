@@ -5,13 +5,20 @@ metadata:
   namespace: cronjob
 data:
   train_lstm.py: |
-    # 🧠 Train LSTM — Forecast RPS/CPU from Silver Layer
     import os, sys, s3fs, pandas as pd, pyarrow.parquet as pq, numpy as np
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout
     from tensorflow.keras.optimizers import Adam
     from sklearn.preprocessing import MinMaxScaler
-    import mlflow, mlflow.tensorflow
+    import mlflow
+    import mlflow.keras
+
+    # === Debug environment ===
+    print("=== ENVIRONMENT DUMP (MLFLOW + S3) ===")
+    for k, v in os.environ.items():
+        if any(x in k for x in ["MLFLOW", "S3", "AWS"]):
+            print(f"{k}={v}")
+    print("=======================================")
 
     # === Environment ===
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")
@@ -20,6 +27,7 @@ data:
     SILVER_PREFIX = os.getenv("SILVER_PREFIX", "silver/metrics")
     BUCKET = os.getenv("S3_BUCKET", "datalake")
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
+    MLFLOW_S3_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL")
     TARGET = os.getenv("TARGET", "rps_1m")
     WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
     EPOCHS = int(os.getenv("EPOCHS", "40"))
@@ -30,10 +38,9 @@ data:
     client_args = {"endpoint_url": S3_ENDPOINT}
     if FORCE_HTTP:
         client_args["verify"] = False
-
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
 
-    # === STEP 1: Read all Silver parquet files ===
+    # === STEP 1: Read Silver parquet ===
     prefix = f"{BUCKET}/{SILVER_PREFIX}/"
     svc_paths = fs.glob(prefix + "date=*/service=*/")
     if not svc_paths:
@@ -46,20 +53,14 @@ data:
             date_part = path.split("/date=")[1].split("/")[0]
             service = path.split("/service=")[1].split("/")[0]
             parquet_files = fs.glob(f"{prefix}date={date_part}/service={service}/part-*.parquet")
-
             if not parquet_files:
-                print(f"[SKIP] {service}/{date_part} — no parquet files")
                 continue
-
             for f in parquet_files:
                 with fs.open(f, "rb") as fobj:
                     table = pq.read_table(fobj)
                     df = table.to_pandas()
                     df["service"] = service
                     dfs.append(df)
-
-            print(f"[INFO] Loaded {len(parquet_files)} parquet files for {service} ({date_part})")
-
         except Exception as e:
             print(f"[WARN] Skip {path}: {e}")
 
@@ -70,17 +71,9 @@ data:
     df = pd.concat(dfs, ignore_index=True)
     print(f"[OK] Loaded total {len(df)} rows from Silver layer")
 
-    # === STEP 2: Prepare features ===
+    # === STEP 2: Prepare data ===
     feature_cols = [c for c in df.columns if c not in ["ts", "service"]]
-
-    # --- Clean NaN rows before training ---
-    before = len(df)
     df = df.dropna().reset_index(drop=True)
-    after = len(df)
-    print(f"[CLEAN] Dropped {before - after} rows containing NaN (remaining: {after})")
-
-    # --- Scale features ---
-    from sklearn.preprocessing import MinMaxScaler
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df[feature_cols])
 
@@ -96,11 +89,17 @@ data:
     X_train, y_train = X[:train_size], y[:train_size]
     X_val, y_val = X[train_size:], y[train_size:]
 
-    # === STEP 3: Train and log to MLflow ===
+    # === STEP 3: Train & Log to MLflow ===
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("lstm_forecast")
 
-    with mlflow.start_run():
+    print(f"[CONNECT] Tracking URI: {MLFLOW_TRACKING_URI}")
+    print(f"[CONNECT] Artifact store: {MLFLOW_S3_URL}")
+
+    with mlflow.start_run() as run:
+        run_id = run.info.run_id
+        print(f"[RUN] MLflow run_id = {run_id}")
+
         mlflow.log_param("target", TARGET)
         mlflow.log_param("window_size", WINDOW_SIZE)
         mlflow.log_param("epochs", EPOCHS)
@@ -113,12 +112,16 @@ data:
             Dense(1)
         ])
         model.compile(optimizer=Adam(1e-3), loss="mae", metrics=["mape"])
-        history = model.fit(X_train, y_train,
-                            validation_data=(X_val, y_val),
-                            epochs=EPOCHS, batch_size=BATCH, verbose=1)
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=EPOCHS, batch_size=BATCH, verbose=1
+        )
 
         val_mape = float(min(history.history["val_mape"]))
         mlflow.log_metric("val_mape", val_mape)
-        mlflow.tensorflow.log_model(model, "model")
 
-    print("[OK] Train completed. Model and metrics logged to MLflow.")
+        # === Log model as MLflow Keras model ===
+        mlflow.keras.log_model(model, artifact_path="model")
+
+    print("[DONE] Training complete. Model logged to MLflow registry.")

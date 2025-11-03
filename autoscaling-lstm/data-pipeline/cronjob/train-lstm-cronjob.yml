@@ -22,7 +22,7 @@ spec:
           containers:
             - name: train-lstm
               image: ducanhvo/train-lstm:latest
-              imagePullPolicy: IfNotPresent
+              imagePullPolicy: Always
 
               command: ["python"]
               args: ["/app/train_lstm.py"]
@@ -34,6 +34,10 @@ spec:
                 # --- CẤU HÌNH MINIO (Artifact Store) ---
                 - name: S3_ENDPOINT
                   value: "http://minio.minio.svc.cluster.local:9000"
+                - name: MLFLOW_S3_ENDPOINT_URL
+                  value: "http://minio.minio.svc.cluster.local:9000"
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: "s3://datalake/mlflow"
                 - name: S3_BUCKET
                   value: "datalake"
                 - name: SILVER_PREFIX
