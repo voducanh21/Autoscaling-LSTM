@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: predictor-exporter-script
+  namespace: model
+data:
+  predictor_exporter.py: |
+    import os
+    import time
+    import requests
+    from math import ceil
+    from collections import deque
+    from prometheus_client import start_http_server, Gauge
+
+    # === ENV CONFIG ===
+    PROM_URL = os.getenv("PROM_URL", "http://prometheus-operated.monitoring.svc.cluster.local:9090")
+    MODEL_ENDPOINT = os.getenv("MODEL_ENDPOINT", "http://lstm-serving.model.svc.cluster.local:8080/predict")
+    EXPORT_PORT = int(os.getenv("EXPORT_PORT", "9101"))
+    INTERVAL = int(os.getenv("INTERVAL_SECONDS", "1"))
+    TARGET_RPS_PER_POD = float(os.getenv("TARGET_RPS_PER_POD", "50"))
+    APP_JOB = os.getenv("APP_JOB", "api-gateway")
+
+    # === METRICS ===
+    g_pred_rps = Gauge("lstm_pred_rps", "Predicted RPS for next window")
+    g_desired_replicas = Gauge("lstm_desired_replicas", "Desired replicas from LSTM forecast")
+
+    # === BUFFER (30 bước, mỗi bước có 32 feature) ===
+    WINDOW_SIZE = 30
+    FEATURE_COUNT = 32
+    buffer = deque(maxlen=WINDOW_SIZE)
+
+    def query_prom(q: str) -> float:
+        try:
+            r = requests.get(f"{PROM_URL}/api/v1/query", params={"query": q}, timeout=5)
+            r.raise_for_status()
+            data = r.json()
+            if data["status"] != "success" or not data["data"]["result"]:
+                return 0.0
+            return float(data["data"]["result"][0]["value"][1])
+        except Exception as e:
+            print(f"[PROM] Error querying {q}: {e}")
+            return 0.0
+
+    def get_current_features():
+        """
+        Lấy 32 feature numeric hiện tại từ Prometheus
+        (dùng đúng schema của Silver dataset)
+        """
+        return [
+                   query_prom(f'svc:qps:rate1m{{job="{APP_JOB}"}}'),             # rps_1m
+                   query_prom(f'svc:latency:p95{{job="{APP_JOB}"}}'),            # latency_p95_ms
+                   query_prom(f'svc:cpu:cores:avg{{job="{APP_JOB}"}}'),          # cpu_cores_1m
+                   query_prom(f'svc:mem:bytes:avg{{job="{APP_JOB}"}}'),          # mem_bytes
+                   query_prom(f'svc:hour{{job="{APP_JOB}"}}'),                   # hour
+                   query_prom(f'svc:dow{{job="{APP_JOB}"}}'),                    # dow
+                   # rolling means & lags (các chỉ số dựa trên Silver schema)
+                   *[
+                       query_prom(f'svc:{metric}{{job="{APP_JOB}"}}')
+                       for metric in [
+                           "rps_roll_mean_3m", "p95_roll_mean_3m",
+                           "rps_roll_mean_5m", "p95_roll_mean_5m",
+                           "rps_roll_mean_10m", "p95_roll_mean_10m",
+                           "rps_lag_1m", "p95_lag_1m", "cpu_lag_1m", "mem_lag_1m",
+                           "rps_lag_2m", "p95_lag_2m", "cpu_lag_2m", "mem_lag_2m",
+                           "rps_lag_3m", "p95_lag_3m", "cpu_lag_3m", "mem_lag_3m",
+                           "rps_lag_5m", "p95_lag_5m", "cpu_lag_5m", "mem_lag_5m",
+                           "rps_lag_10m", "p95_lag_10m", "cpu_lag_10m", "mem_lag_10m",
+                       ]
+                   ]
+               ][:FEATURE_COUNT]  # giới hạn đúng 32 feature
+
+    def call_model(window):
+        """Gọi model serving với chuỗi (30, 32)"""
+        payload = {"inputs": [window]}  # shape (1, 30, 32)
+        try:
+            r = requests.post(MODEL_ENDPOINT, json=payload, timeout=10)
+            r.raise_for_status()
+            out = r.json()
+            return float(out.get("predictions", [0])[0])
+        except Exception as e:
+            print(f"[MODEL] Error calling model: {e}")
+            return 0.0
+
+    def loop():
+        while True:
+            feats = get_current_features()
+            if len(feats) != FEATURE_COUNT:
+                print(f"[WARN] Expected 32 features, got {len(feats)}")
+                time.sleep(INTERVAL)
+                continue
+
+            buffer.append(feats)
+
+            if len(buffer) < WINDOW_SIZE:
+                print(f"[EXPORTER] Warm-up {len(buffer)}/{WINDOW_SIZE} steps...")
+                time.sleep(INTERVAL)
+                continue
+
+            window = list(buffer)
+            pred_rps = call_model(window)
+            desired = max(1, ceil(pred_rps / TARGET_RPS_PER_POD))
+
+            g_pred_rps.set(pred_rps)
+            g_desired_replicas.set(desired)
+            print(f"[EXPORTER] pred_rps={pred_rps:.4f}, desired={desired}")
+            time.sleep(INTERVAL)
+
+    if __name__ == "__main__":
+        print(f"[EXPORTER] Running Predictor Exporter on port {EXPORT_PORT}")
+        print(f"[INFO] PROM_URL={PROM_URL}")
+        print(f"[INFO] MODEL_ENDPOINT={MODEL_ENDPOINT}")
+        print(f"[INFO] APP_JOB={APP_JOB}")
+        start_http_server(EXPORT_PORT)
+        loop()

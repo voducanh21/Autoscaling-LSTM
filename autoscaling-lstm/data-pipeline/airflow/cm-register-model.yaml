@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: register-model-script
+  namespace: cronjob
+data:
+  register_model.py: |
+    import os
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    import subprocess
+
+    # === CONFIG ===
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
+    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = MlflowClient()
+
+    print(f"[INFO] Tracking URI: {MLFLOW_TRACKING_URI}")
+    print(f"[INFO] Model Name: {MODEL_NAME}")
+
+    # === GET LATEST MODEL (stage=None) ===
+    latest_none = client.get_latest_versions(MODEL_NAME, stages=["None"])
+    if not latest_none:
+        print("❌ No new model found to register.")
+        exit(0)
+
+    new_model = latest_none[0]
+    new_run_id = new_model.run_id
+    new_version = new_model.version
+    print(f"[NEW] Found new model version={new_version}, run_id={new_run_id}")
+
+    # === GET CURRENT PRODUCTION MODEL ===
+    prod_versions = client.get_latest_versions(MODEL_NAME, stages=["Production"])
+    current_metrics = {}
+    if prod_versions:
+        current_prod = prod_versions[0]
+        current_run_id = current_prod.run_id
+        current_metrics = client.get_run(current_run_id).data.metrics
+        print(f"[CURRENT] Production version={current_prod.version}, metrics={current_metrics}")
+    else:
+        print("[INFO] No Production model found (first deployment).")
+
+    # === GET NEW MODEL METRICS ===
+    new_metrics = client.get_run(new_run_id).data.metrics
+    print(f"[NEW] Candidate metrics={new_metrics}")
+
+    # === EXTRACT MAPE VALUES ===
+    def avg_mape(metrics: dict):
+        keys = ["val_mape_rps", "val_mape_cpu", "val_mape_mem"]
+        vals = [metrics.get(k) for k in keys if k in metrics]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    current_avg = avg_mape(current_metrics)
+    new_avg = avg_mape(new_metrics)
+
+    # === DECISION ===
+    promote = False
+    if new_avg is None:
+        print("⚠️ New model missing MAPE metrics → skip promotion.")
+    elif current_avg is None:
+        print("🆕 First model deployment → promote by default.")
+        promote = True
+    elif new_avg < current_avg:
+        print(f"✅ Improved model (avg MAPE {new_avg:.4f} < {current_avg:.4f}) → promote.")
+        promote = True
+    else:
+        print(f"🛑 Worse model (avg MAPE {new_avg:.4f} >= {current_avg:.4f}) → skip promotion.")
+
+    if not promote:
+        print("❌ Model will NOT be promoted to Production.")
+        exit(0)
+
+    # === PROMOTE MODEL ===
+    client.transition_model_version_stage(
+        name=MODEL_NAME,
+        version=new_version,
+        stage="Production",
+        archive_existing_versions=True,
+    )
+    print(f"✅ Promoted model version {new_version} → Production")
+
+    # === UPDATE CONFIGMAP ===
+    model_uri = f"models:/{MODEL_NAME}/Production"
+    patch_cmd = [
+        "kubectl", "patch", "configmap", "lstm-config",
+        "-n", "model",
+        "-p", f'{{"data":{{"MODEL_URI":"{model_uri}"}}}}'
+    ]
+    subprocess.run(patch_cmd, check=False)
+    print(f"🔁 Updated ConfigMap 'lstm-config' with MODEL_URI={model_uri}")
+
+    # === RESTART DEPLOYMENT ===
+    restart_cmd = [
+        "kubectl", "rollout", "restart", "deployment/lstm-serving",
+        "-n", "model"
+    ]
+    subprocess.run(restart_cmd, check=False)
+    print("♻️ Restarted deployment 'lstm-serving' to load new model")

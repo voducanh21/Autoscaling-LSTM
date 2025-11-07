@@ -1,53 +1,91 @@
+# ============================================================
+# 🧩 1. ServiceAccount + Role + RoleBinding
+# ============================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: register-model-sa
+  namespace: cronjob
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: register-model-role
+  namespace: model
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: register-model-rolebinding
+  namespace: model
+subjects:
+  - kind: ServiceAccount
+    name: register-model-sa
+    namespace: cronjob
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: register-model-role
+---
+# ============================================================
+# 🧩 2. CronJob — Train + Register (2 Stages)
+# ============================================================
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: train-lstm-cronjob
   namespace: cronjob
 spec:
-  # Chạy mỗi 6 giờ (vẫn giữ nguyên)
-  schedule: "0 */6 * * *"
-  suspend: true
+  schedule: "0 */6 * * *"        # chạy mỗi 6 tiếng
+  suspend: false                 # bật lại nếu muốn chạy thật
   jobTemplate:
     spec:
       template:
         spec:
-          # GÁN POD CHẠY TRÊN NODE k3n-m03
+          serviceAccountName: register-model-sa
+          restartPolicy: Never
           nodeSelector:
             kubernetes.io/hostname: k3n-m03
 
-          # Không cần pull vì image đã có sẵn trên node
-          imagePullSecrets: []
-          restartPolicy: Never
-
           containers:
+            # ======================================================
+            # 🧩 STAGE 1 — TRAIN MODEL
+            # ======================================================
             - name: train-lstm
               image: ducanhvo/train-lstm:latest
               imagePullPolicy: Always
-
               command: ["python"]
               args: ["/app/train_lstm.py"]
 
               env:
-                - name: AWS_STORAGE_FORCE_HTTP
-                  value: "true"
-
-                # --- CẤU HÌNH MINIO (Artifact Store) ---
+                # --- S3 / MinIO ---
                 - name: S3_ENDPOINT
-                  value: "http://minio.minio.svc.cluster.local:9000"
+                  value: "https://minio.voducanh.id.vn"          # ✅ dùng HTTPS qua Cloudflare
                 - name: MLFLOW_S3_ENDPOINT_URL
-                  value: "http://minio.minio.svc.cluster.local:9000"
+                  value: "https://minio.voducanh.id.vn"          # ✅ thống nhất
+                - name: MLFLOW_ARTIFACT_ROOT
+                  value: "s3://datalake/mlflow"
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: "s3://datalake/mlflow"
                 - name: S3_BUCKET
                   value: "datalake"
                 - name: SILVER_PREFIX
                   value: "silver/metrics"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"                                  # ✅ ép path-style
 
-                # --- CẤU HÌNH MLFLOW ---
+                # --- MLFLOW ---
                 - name: MLFLOW_TRACKING_URI
                   value: "http://mlflow.mlflow.svc.cluster.local:5000"
 
-                # --- THAM SỐ HUẤN LUYỆN ---
+                # --- Training Params ---
                 - name: TARGET
                   value: "rps_1m"
                 - name: WINDOW_SIZE
@@ -57,7 +95,7 @@ spec:
                 - name: BATCH_SIZE
                   value: "64"
 
-                # --- CREDENTIALS (MinIO) ---
+                # --- MINIO credentials ---
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:
                     secretKeyRef:
@@ -70,10 +108,63 @@ spec:
                       key: AWS_SECRET_ACCESS_KEY
 
               volumeMounts:
-                - name: train-script
+                - name: train-lstm-script
                   mountPath: /app
+                  readOnly: true
 
+            # ======================================================
+            # 🧩 STAGE 2 — REGISTER MODEL
+            # ======================================================
+            - name: register-model
+              image: python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-lc"]
+              args:
+                - |
+                  apt-get update -qq && apt-get install -y -qq curl && \
+                  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+                  install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+                  pip install -q mlflow kubernetes && \
+                  python /app/register_model.py
+
+              env:
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+                - name: MODEL_NAME
+                  value: "lstm_forecast"
+                - name: CONFIGMAP_NAME
+                  value: "lstm-config"
+                - name: CONFIGMAP_NAMESPACE
+                  value: "model"
+
+                # --- MINIO credentials (reuse) ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"          # ✅ đồng bộ endpoint
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+              volumeMounts:
+                - name: register-model-script
+                  mountPath: /app
+                  readOnly: true
+
+          # ======================================================
+          # Volumes (ConfigMaps)
+          # ======================================================
           volumes:
-            - name: train-script
+            - name: train-lstm-script
               configMap:
                 name: train-lstm-script
+            - name: register-model-script
+              configMap:
+                name: register-model-script

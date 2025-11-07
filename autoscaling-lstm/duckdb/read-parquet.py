@@ -4,13 +4,13 @@ import pandas as pd
 
 # ===== Cấu hình MinIO =====
 fs = s3fs.S3FileSystem(
-    key="TDDg0O0vTrGcbr0LZJtH",
-    secret="wYB14ni0Zx1y0fngsqrgha3FxNAdj5WYF7TxW06X",
+    key="drdKpY8zDE5xl4W4Xtua",
+    secret="FY2TYxyGLb1kRqHZ7UP7jLGVvldKITYaDLbx9hWQ",
     client_kwargs={"endpoint_url": "http://127.0.0.1:9000"},
 )
 
 # ===== Đường dẫn thư mục Silver cụ thể =====
-prefix = "datalake/silver/metrics/date=2025-10-30/service=product-service"
+prefix = "datalake/silver/metrics/date=2025-10-31/service=product-service"
 
 # ===== Lấy danh sách file .parquet =====
 files = fs.ls(prefix)

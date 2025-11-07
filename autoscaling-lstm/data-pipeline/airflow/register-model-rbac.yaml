@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: register-model-sa
+  namespace: cronjob
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: model-manager
+  namespace: model
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: model-manager-binding
+  namespace: model
+subjects:
+  - kind: ServiceAccount
+    name: register-model-sa
+    namespace: cronjob
+roleRef:
+  kind: Role
+  name: model-manager
+  apiGroup: rbac.authorization.k8s.io

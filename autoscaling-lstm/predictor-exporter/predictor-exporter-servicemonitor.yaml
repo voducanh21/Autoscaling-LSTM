@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: predictor-exporter
+  namespace: model                 # giống namespace của exporter pod
+  labels:
+    release: kube-prometheus
+spec:
+  jobLabel: app
+  namespaceSelector:
+    matchNames: ["model"]
+  selector:
+    matchLabels:
+      app: predictor-exporter      # phải khớp label ở Service
+  endpoints:
+    - port: http-metrics           # khớp với name trong Service
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

@@ -38,8 +38,9 @@ with DAG(
             "PROM_URL": "http://kube-prometheus-kube-prome-prometheus.monitoring.svc.cluster.local:9090",
             "S3_BUCKET": "datalake",
             "S3_PREFIX": "bronze/metrics",
-            "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
+            "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
+            "AWS_S3_ADDRESSING_STYLE": "path",
         },
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))

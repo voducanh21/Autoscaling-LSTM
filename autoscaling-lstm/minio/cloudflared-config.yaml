@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-config
+  namespace: minio
+data:
+  config.yaml: |
+    tunnel: 356077d4-89e1-41ef-b578-5c8f9df1a790   # ✅ cập nhật mới
+    credentials-file: /etc/cloudflared/credentials/credentials.json
+    ingress:
+      - hostname: minio.voducanh.id.vn
+        service: http://minio.minio.svc.cluster.local:9000
+      - hostname: minioconsole.voducanh.id.vn
+        service: http://minio-console.minio.svc.cluster.local:9001
+      - service: http_status:404
+

@@ -25,11 +25,12 @@ with DAG(
             "S3_BUCKET": "datalake",
             "BRONZE_PREFIX": "bronze/metrics",
             "SILVER_PREFIX": "silver/metrics",
-            "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
+            "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
             "PAST_HOURS": "48",
             "ROLL_WINDOWS": "[5,15]",
             "LAG_MINUTES": "[1,5,10]",
+            "AWS_S3_ADDRESSING_STYLE": "path",
         },
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))

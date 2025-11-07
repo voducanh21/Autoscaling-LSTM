@@ -1,0 +1,20 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-gateway-scaledobject
+  namespace: apps           # ⚠️ trùng với namespace của Deployment
+spec:
+  scaleTargetRef:
+    name: api-gateway
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 60
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+        metricName: lstm_desired_replicas
+        query: lstm_desired_replicas
+        threshold: "1.5"
