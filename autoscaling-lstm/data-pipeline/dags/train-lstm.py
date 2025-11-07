@@ -36,7 +36,7 @@ with DAG(
     )
 
     # ==============================================================
-    # 🧩 STAGE 1: Huấn luyện mô hình (Train)
+    #  STAGE 1: Huấn luyện mô hình (Train)
     # ==============================================================
     train_lstm = KubernetesPodOperator(
         task_id="train_lstm",
@@ -73,7 +73,7 @@ with DAG(
     )
 
     # ==============================================================
-    # 🧩 STAGE 2: Đăng ký và promote mô hình (Register)
+    #  STAGE 2: Đăng ký và promote mô hình (Register)
     # ==============================================================
     register_model = KubernetesPodOperator(
         task_id="register_model",
