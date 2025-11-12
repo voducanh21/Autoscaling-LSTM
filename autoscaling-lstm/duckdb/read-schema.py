@@ -1,44 +1,45 @@
-import duckdb
+import s3fs
+import pyarrow.parquet as pq
+import pandas as pd
 
-# === Cấu hình S3 ===
-S3_PATH = "s3://datalake/bronze/metrics/date=2025-10-18/service=product-service"
+# ===== Cấu hình MinIO =====
+fs = s3fs.S3FileSystem(
+    key="H7TLSw9YlDtC88KDjzMN",
+    secret="6thNYmyTFH1HZdl1DIw4mSx8Z6Eu8p2lIg50yizL",
+    client_kwargs={"endpoint_url": "https://minio.voducanh.id.vn"},
+)
 
-# === Kết nối và cấu hình DuckDB + HTTPFS ===
-con = duckdb.connect()
-con.execute("""
-  INSTALL httpfs;
-  LOAD httpfs;
+# ===== Đường dẫn thư mục Silver cụ thể =====
+prefix = "datalake/silver/metrics/date=2025-11-12/service=api-gateway"
 
-  SET s3_url_style='path';
-  SET s3_endpoint='127.0.0.1:9000';
-  SET s3_use_ssl=false;
-  SET s3_access_key_id='1Z3UT6tcLTuxaDrJYoyO';
-  SET s3_secret_access_key='6Vs1ORxhTNzcgzRyTvQsslsWVEfhH1ESxsbaVRRx';
-""")
+# ===== Lấy danh sách file .parquet =====
+files = fs.ls(prefix)
+parquet_files = [f for f in files if f.endswith(".parquet")]
 
-# === Đọc trước vài dòng để xem dữ liệu (tắt hive_partitioning) ===
-df = con.execute(f"""
-  SELECT *
-  FROM read_parquet('{S3_PATH}/*.parquet', hive_partitioning=false)
-  ORDER BY ts
-  LIMIT 100
-""").fetchdf()
+if not parquet_files:
+    raise ValueError("Không tìm thấy file Parquet nào trong thư mục Silver.")
 
-print("=== Preview (100 rows) ===")
-print(df.to_string(index=False))
+print(f"→ Tìm thấy {len(parquet_files)} file parquet:")
+for f in parquet_files:
+    print("  ", f)
 
-# === Kiểm tra kiểu dữ liệu (schema thực tế trong file) ===
-schema = con.execute(f"""
-  DESCRIBE SELECT * FROM read_parquet('{S3_PATH}/*.parquet', hive_partitioning=false)
-""").fetchdf()
+# ===== Đọc và gộp dữ liệu, chỉ lấy 2 cột =====
+dfs = []
+for f in parquet_files:
+    with fs.open(f, "rb") as file:
+        table = pq.read_table(file, columns=["ts", "service"])
+        df = table.to_pandas()
+        dfs.append(df)
 
-print("\n=== Schema ===")
-print(schema)
+df_all = pd.concat(dfs, ignore_index=True)
 
-# === Đếm tổng số dòng ===
-n_rows = con.execute(f"""
-  SELECT count(*) 
-  FROM read_parquet('{S3_PATH}/*.parquet', hive_partitioning=false)
-""").fetchone()[0]
+# ===== Hiển thị schema và dữ liệu chỉ gồm ts, service =====
+print("\n=== Schema trong Parquet (rút gọn) ===")
+print(df_all.dtypes)
 
-print("\nTổng số dòng:", n_rows)
+print("\n=== Dữ liệu (chỉ gồm ts, service) ===")
+pd.set_option("display.max_rows", None)
+pd.set_option("display.width", 0)
+print(df_all)
+
+print(f"\nTổng số dòng sau khi gộp: {len(df_all)}")

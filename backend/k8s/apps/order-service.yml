@@ -30,11 +30,11 @@ spec:
           # --- ADDED: baseline requests/limits để scheduler ổn định hơn
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "250m"
+              memory: "256Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "1000m"
+              memory: "1Gi"
           env:
             - name: SPRING_DATA_MONGODB_URI
               value: mongodb://root:password@mongo.infra.svc.cluster.local:27017/orderdb?authSource=admin

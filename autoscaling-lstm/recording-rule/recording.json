@@ -72,17 +72,24 @@
     },
     {
       "type": "timeseries",
-      "title": "CPU Usage per Pod (cores, 1m)",
+      "title": "CPU Usage per Pod (millicores, 1m)",
       "id": 3,
       "datasource": "${DS_PROMETHEUS}",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "fieldConfig": {
-        "defaults": { "unit": "cores", "custom": { "stacking": { "mode": "normal" }, "drawStyle": "line" } },
+        "defaults": {
+          "unit": "mcores",
+          "custom": {
+            "stacking": { "mode": "normal" },
+            "drawStyle": "line",
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       },
       "targets": [
         {
-          "expr": "pod:cpu:usage1m{namespace=\"apps\",pod=~\"${service:regex}-.*\"}",
+          "expr": "pod:cpu:usage1m{namespace=\"apps\",pod=~\"${service:regex}-.*\"} * 1000",
           "legendFormat": "{{pod}}",
           "refId": "A"
         }

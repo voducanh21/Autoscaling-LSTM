@@ -6,6 +6,7 @@ metadata:
 data:
   main.py: |
     import os
+    import mlflow
     import mlflow.pyfunc
     from fastapi import FastAPI, HTTPException
     import numpy as np
@@ -15,12 +16,15 @@ data:
 
     # === ENVIRONMENT CONFIG ===
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
-    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio.minio.svc.cluster.local:9000")
+    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "https://minio.voducanh.id.vn")
     MODEL_URI = os.getenv("MODEL_URI")  # ex: models:/lstm_forecast/Production
     MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
+    # S3 config
     os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
+    os.environ["AWS_S3_ADDRESSING_STYLE"] = "path"
 
     # === LOAD MODEL ===
     if not MODEL_URI:
@@ -41,18 +45,28 @@ data:
     @app.post("/predict")
     def predict(data: dict):
         try:
-            # Nhận dữ liệu đầu vào từ exporter: {"inputs": [[[...30 giá trị...]]]}
             inputs = data.get("inputs") or data.get("features")
             if inputs is None:
                 raise ValueError("Missing 'inputs' or 'features' in request body")
 
-            # Ép kiểu numpy float32, đúng định dạng (1, 30, 1)
+            # Expect (1,30,5)
             arr = np.array(inputs, dtype=np.float32)
-            if arr.ndim != 3:
-                raise ValueError(f"Expected shape (1, 30, 1), got {arr.shape}")
+            if arr.ndim != 3 or arr.shape[2] != 5:
+                raise ValueError(f"Expected shape (1, 30, 5), got {arr.shape}")
 
             preds = model.predict(arr)
-            return {"predictions": preds.flatten().tolist()}
+            preds = np.array(preds).flatten().tolist()
+
+            # 3 outputs: rps_future, cpu_future, mem_future
+            if len(preds) >= 3:
+                return {
+                    "rps_future": preds[0],
+                    "cpu_future": preds[1],
+                    "mem_future": preds[2],
+                    "predictions": preds,
+                }
+            return {"predictions": preds}
+
         except Exception as e:
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
@@ -86,7 +100,9 @@ spec:
             - name: MLFLOW_TRACKING_URI
               value: "http://mlflow.mlflow.svc.cluster.local:5000"
             - name: MLFLOW_S3_ENDPOINT_URL
-              value: "http://minio.minio.svc.cluster.local:9000"
+              value: "https://minio.voducanh.id.vn"
+            - name: AWS_S3_ADDRESSING_STYLE
+              value: "path"
             - name: MODEL_NAME
               value: "lstm_forecast"
             - name: AWS_ACCESS_KEY_ID

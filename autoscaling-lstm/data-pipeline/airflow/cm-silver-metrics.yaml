@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: silver-metrics-script
-  namespace: airflow
+  namespace: cronjob
 data:
   silver_builder.py: |
     # 🥈 Silver Layer — build normalized, rolling, lag, and future-target features from Bronze
@@ -25,7 +25,7 @@ data:
     ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[3,5,10,15,30]"))
     LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3,5,10]"))
     HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
-    CPU_LIMIT = float(os.getenv("CPU_LIMIT_CORES", "1.0"))     # per-pod CPU limit
+    CPU_LIMIT = float(os.getenv("CPU_LIMIT_CORES", "1.0"))
     MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1 GiB default
 
     try:
@@ -42,11 +42,11 @@ data:
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
                            client_kwargs={"endpoint_url": S3_ENDPOINT})
 
-    # === STEP 1: READ BRONZE (last 30 minutes) ===
+    # === STEP 1: READ BRONZE (last 20 minutes) ===
     def read_bronze():
         prefix = f"{BUCKET}/{BRONZE_PREF}/"
         now = datetime.now(timezone.utc)
-        min_time = now - timedelta(minutes=30)
+        min_time = now - timedelta(minutes=20)
         print(f"[INFO] Collecting Bronze files newer than {min_time.astimezone(TZ)}")
 
         svc_paths = fs.glob(prefix + "date=*/service=*/")
@@ -59,7 +59,20 @@ data:
                 d = path.split("/date=")[1].split("/")[0]
                 svc = path.split("/service=")[1].split("/")[0]
                 files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
-                recent = [f for f in files if fs.info(f)["LastModified"] >= min_time]
+
+                recent = []
+                for f in files:
+                    try:
+                        info = fs.info(f)
+                        if "LastModified" in info:
+                            if info["LastModified"] >= min_time:
+                                recent.append(f)
+                        else:
+                            recent.append(f)
+                    except Exception as e:
+                        print(f"[WARN] Could not read metadata for {f}: {e}")
+                        recent.append(f)
+
                 for fpath in recent:
                     with fs.open(fpath, "rb") as fobj:
                         df = pq.read_table(fobj).to_pandas()
@@ -68,7 +81,7 @@ data:
             except Exception as e:
                 print(f"[WARN] Skip {path}: {e}")
         if not dfs:
-            raise RuntimeError("No Bronze data found in recent 30-minute window")
+            raise RuntimeError("No Bronze data found in recent 20-minute window")
         return pd.concat(dfs, ignore_index=True)
 
     # === STEP 2: CLEAN + NORMALIZE SCHEMA ===
@@ -80,7 +93,6 @@ data:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=["ts", "service"])
 
-        # normalize CPU & MEM to 0-1 range
         df["cpu_norm"] = df["cpu_cores_1m"] / CPU_LIMIT
         df["mem_norm"] = df["mem_bytes"] / MEM_LIMIT
         df["hour"] = df["ts"].dt.tz_convert(TZ).dt.hour
@@ -92,28 +104,23 @@ data:
         g = g.drop_duplicates(subset=["ts"])
         g = g.set_index("ts").asfreq("1min")
 
-        # Fill base metrics
         for c in ["rps_1m", "latency_p95_ms", "cpu_norm", "mem_norm"]:
             g[c] = g[c].ffill().bfill()
 
-        # Rolling features
         for w in ROLL_LIST:
             g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}min").mean()
             g[f"cpu_roll_mean_{w}m"] = g["cpu_norm"].rolling(f"{w}min").mean()
             g[f"mem_roll_mean_{w}m"] = g["mem_norm"].rolling(f"{w}min").mean()
 
-        # Lag features
         for l in LAG_LIST:
             g[f"rps_lag_{l}m"] = g["rps_1m"].shift(l)
             g[f"cpu_lag_{l}m"] = g["cpu_norm"].shift(l)
             g[f"mem_lag_{l}m"] = g["mem_norm"].shift(l)
 
-        # === Future targets (HORIZON minutes ahead) ===
         g["rps_future"] = g["rps_1m"].shift(-HORIZON)
         g["cpu_future"] = g["cpu_norm"].shift(-HORIZON)
         g["mem_future"] = g["mem_norm"].shift(-HORIZON)
 
-        # Cleanup
         g = g.replace([np.inf, -np.inf], np.nan).fillna(method="bfill").fillna(method="ffill")
         g = g.dropna(subset=["rps_future", "cpu_future", "mem_future"])
         g.index = g.index.tz_convert(TZ)
@@ -138,3 +145,23 @@ data:
                     storage_options=storage_opts,
                     use_dictionary=False,
                 )
+                print(f"[OK] wrote {path} (rows={len(sub2)})")
+
+    # === MAIN ===
+    def main():
+        try:
+            df_bronze = read_bronze()
+            df_clean = enforce_schema(df_bronze)
+            result = []
+            for svc, g in df_clean.groupby("service"):
+                result.append(add_features(g))
+            df_final = pd.concat(result, ignore_index=True)
+            df_final = df_final.drop_duplicates(subset=["service", "ts"], keep="last")
+            write_silver(df_final)
+            print("[INFO] Silver pipeline completed successfully.")
+        except Exception as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if __name__ == "__main__":
+        main()

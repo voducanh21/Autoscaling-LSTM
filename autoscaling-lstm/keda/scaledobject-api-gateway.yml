@@ -17,4 +17,4 @@ spec:
         serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
         metricName: lstm_desired_replicas
         query: lstm_desired_replicas
-        threshold: "1.5"
+        threshold: "1"

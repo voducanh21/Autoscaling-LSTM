@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: locust-12h18h
+  namespace: loadtest
+spec:
+  schedule: "0 12 * * *"   # chạy lúc 12:00 hàng ngày
+  timeZone: "Asia/Ho_Chi_Minh"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: locust
+              image: locustio/locust:2.31.3
+              command: ["locust"]
+              args:
+                [
+                  "-f", "/mnt/locust/locustfile.py",
+                  "--headless",
+                  "-u", "400", "-r", "30",
+                  "--run-time", "6h",
+                  "--host", "http://api-gateway.apps.svc.cluster.local:8888"
+                ]
+              env:
+                - name: STOP_HOUR
+                  value: "18"
+              volumeMounts:
+                - name: locustfile
+                  mountPath: /mnt/locust
+          restartPolicy: Never
+          volumes:
+            - name: locustfile
+              configMap:
+                name: locustfile

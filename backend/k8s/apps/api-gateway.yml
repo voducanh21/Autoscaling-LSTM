@@ -30,11 +30,11 @@ spec:
           # --- ADDED: baseline requests/limits để scheduler đỡ nghẽn (điều chỉnh theo thực tế)
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "250m"
+              memory: "256Mi"
             limits:
-              cpu: "500m"
-              memory: "512Mi"
+              cpu: "1000m"
+              memory: "1Gi"
           env:
             - name: PRODUCT_SERVICE_URL
               valueFrom:

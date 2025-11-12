@@ -44,7 +44,7 @@ metadata:
   namespace: cronjob
 spec:
   schedule: "0 */6 * * *"        # chạy mỗi 6 tiếng
-  suspend: false                 # bật lại nếu muốn chạy thật
+  suspend: true                 # bật lại nếu muốn chạy thật
   jobTemplate:
     spec:
       template:
