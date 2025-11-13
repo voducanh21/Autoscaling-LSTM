@@ -7,7 +7,7 @@ data:
   locustfile.py: |
     import os, time, threading, requests
     from datetime import datetime
-    import pytz
+    from zoneinfo import ZoneInfo
     from locust import FastHttpUser, task, between, events
 
     # === ENVIRONMENT ===
@@ -27,7 +27,7 @@ data:
     VALID_PRODUCT_ID = int(os.getenv("VALID_PRODUCT_ID", "1"))
 
     # === WEIGHT CONFIG ===
-    W_AUTH, W_PROD, W_ORDER, W_PAYMOD = 1, 1, 1, 1
+    W_AUTH, W_PROD, W_ORDER, W_PAYMOD = 2, 20, 10, 20
 
     class ApiGatewayUser(FastHttpUser):
         host = HOST
@@ -69,8 +69,6 @@ data:
         def paymodes(self):
             self.client.get(PAYMENT_MODES_PATH, name="payment_modes", timeout=TIMEOUT)
 
-
-    # === PROMETHEUS QUERY ===
     def q(query: str) -> float:
         try:
             r = requests.get(f"{PROM_URL}/api/v1/query", params={"query": query}, timeout=5)
@@ -81,8 +79,6 @@ data:
             pass
         return 0.0
 
-
-    # === BACKGROUND MONITOR (theo dõi RPS, CPU, MEM) ===
     def monitor():
         start = time.time()
         while True:
@@ -94,17 +90,14 @@ data:
             elapsed = time.time() - start
             print(f"[MONITOR] {elapsed:.0f}s | RPS={rps:.1f} | CPU={cpu:.0f}m | MEM={mem_mib:.1f}MiB")
 
-
-    # === THREAD STOP TỰ ĐỘNG THEO GIỜ VN ===
     def stop_at_target_hour():
-        tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        tz = ZoneInfo("Asia/Ho_Chi_Minh")
         while True:
             now = datetime.now(tz)
             if now.hour >= STOP_HOUR:
                 print(f"[STOP] {STOP_HOUR}h VN — tự động kết thúc job.")
                 os._exit(0)
             time.sleep(60)
-
 
     @events.test_start.add_listener
     def on_start(environment, **_):
