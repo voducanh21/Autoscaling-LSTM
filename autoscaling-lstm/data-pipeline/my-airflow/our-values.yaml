@@ -11,8 +11,8 @@ mysql:
     persistence:
       enabled: true
       size: 5Gi
-      storageClass: nfs-rwx
-    resources:            # thêm CPU/memory
+      storageClass: local-path
+    resources:
       requests:
         cpu: 800m
         memory: 1Gi
@@ -40,10 +40,11 @@ airflow:
   defaultAirflowTag: "3.0.6"
   airflowVersion: "3.0.6"
 
-  # Disable Celery worker dependencies
   executor: KubernetesExecutor
+
   postgresql:
     enabled: false
+
   workers:
     replicas: 0
 
@@ -80,6 +81,15 @@ airflow:
       credentialsSecret: airflow-git-secret
 
   api:
+    # FIX CHÍNH — khai báo lại đúng command cho API server Airflow 3.x
+    command:
+      - "bash"
+      - "-c"
+      - |
+        exec airflow http \
+          --host 0.0.0.0 \
+          --port 8080
+
     resources:
       requests:
         cpu: 500m
@@ -114,5 +124,3 @@ airflow:
       periodSeconds: 20
       timeoutSeconds: 10
       failureThreshold: 5
-
-

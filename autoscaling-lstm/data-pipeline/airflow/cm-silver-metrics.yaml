@@ -42,11 +42,11 @@ data:
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
                            client_kwargs={"endpoint_url": S3_ENDPOINT})
 
-    # === STEP 1: READ BRONZE (last 20 minutes) ===
+    # === STEP 1: READ BRONZE (last 15 minutes) ===
     def read_bronze():
         prefix = f"{BUCKET}/{BRONZE_PREF}/"
         now = datetime.now(timezone.utc)
-        min_time = now - timedelta(minutes=20)
+        min_time = now - timedelta(minutes=15)
         print(f"[INFO] Collecting Bronze files newer than {min_time.astimezone(TZ)}")
 
         svc_paths = fs.glob(prefix + "date=*/service=*/")
@@ -81,7 +81,7 @@ data:
             except Exception as e:
                 print(f"[WARN] Skip {path}: {e}")
         if not dfs:
-            raise RuntimeError("No Bronze data found in recent 20-minute window")
+            raise RuntimeError("No Bronze data found in recent 15-minute window")
         return pd.concat(dfs, ignore_index=True)
 
     # === STEP 2: CLEAN + NORMALIZE SCHEMA ===
