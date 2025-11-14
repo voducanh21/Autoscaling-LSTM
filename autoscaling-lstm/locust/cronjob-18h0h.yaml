@@ -6,6 +6,7 @@ metadata:
 spec:
   schedule: "0 18 * * *"   # chạy lúc 18:00 hàng ngày
   timeZone: "Asia/Ho_Chi_Minh"
+  suspend: true
   jobTemplate:
     spec:
       template:
@@ -18,7 +19,7 @@ spec:
                 [
                   "-f", "/mnt/locust/locustfile.py",
                   "--headless",
-                  "-u", "550", "-r", "25",
+                  "-u", "550", "-r", "40",
                   "--run-time", "6h",
                   "--host", "http://api-gateway.apps.svc.cluster.local:8888"
                 ]

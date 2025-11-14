@@ -22,8 +22,8 @@ data:
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
-    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[3,5,10,15,30]"))
-    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,2,3,5,10]"))
+    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[5,10,15]"))
+    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,5,10]"))
     HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
     CPU_LIMIT = float(os.getenv("CPU_LIMIT_CORES", "1.0"))
     MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1 GiB default

@@ -63,13 +63,22 @@ airflow:
       port: 3306
       host: "airflow-mysql.airflow.svc.cluster.local"
 
+  #########################################################################
+  # ✔ SECRET KEY + FERNET KEY – ĐÚNG SCHEMA, KHÔNG LỖI HELM
+  #########################################################################
+
   config:
     core:
+      secret_key: "ducanh-super-secret-key-1234567890"
+      fernet_key: "qIUz4MTSqUehzQwO7G8v3BdS5ItPlqrQkF5rRprtVsc="
       load_examples: "False"
 
-  extraEnv: |
-    - name: AIRFLOW__CORE__LOAD_EXAMPLES
-      value: "False"
+    api:
+      secret_key: "ducanh-super-secret-key-1234567890"
+
+  #########################################################################
+  # ✔ GIT SYNC
+  #########################################################################
 
   dags:
     gitSync:
@@ -80,8 +89,11 @@ airflow:
       wait: 30
       credentialsSecret: airflow-git-secret
 
+  #########################################################################
+  # ✔ API SERVER – COMMAND CHUẨN AIRFLOW 3.X
+  #########################################################################
+
   api:
-    # FIX CHÍNH — khai báo lại đúng command cho API server Airflow 3.x
     command:
       - "bash"
       - "-c"

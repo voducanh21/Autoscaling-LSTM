@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: train-lstm-script
-  namespace: airflow
+  namespace: cronjob
 data:
   train_lstm.py: |
     import os, sys, s3fs, pandas as pd, pyarrow.parquet as pq, numpy as np
@@ -14,32 +14,30 @@ data:
     import mlflow
     import mlflow.keras
 
-    # === Debug environment ===
     print("=== ENVIRONMENT DUMP (MLFLOW + S3) ===")
     for k, v in os.environ.items():
         if any(x in k for x in ["MLFLOW", "S3", "AWS"]):
             print(f"{k}={v}")
     print("=======================================")
 
-    # === Environment ===
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     SILVER_PREFIX = os.getenv("SILVER_PREFIX", "silver/metrics")
     BUCKET = os.getenv("S3_BUCKET", "datalake")
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
+
     WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
     EPOCHS = int(os.getenv("EPOCHS", "40"))
     BATCH = int(os.getenv("BATCH_SIZE", "64"))
-    FORCE_HTTP = os.getenv("AWS_STORAGE_FORCE_HTTP", "false").lower() == "true"
 
-    # === Connect S3 ===
+    FORCE_HTTP = os.getenv("AWS_STORAGE_FORCE_HTTP", "false").lower() == "true"
     client_args = {"endpoint_url": S3_ENDPOINT}
     if FORCE_HTTP:
         client_args["verify"] = False
+
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
 
-    # === STEP 1: Read Silver parquet ===
     prefix = f"{BUCKET}/{SILVER_PREFIX}/"
     svc_paths = fs.glob(prefix + "date=*/service=*/")
     if not svc_paths:
@@ -67,12 +65,40 @@ data:
     df = pd.concat(dfs, ignore_index=True)
     print(f"[OK] Loaded total {len(df)} rows from Silver layer")
 
-    # === STEP 2: Prepare features and targets ===
-    input_cols = ["rps_1m", "cpu_norm", "mem_norm", "hour", "dow"]
+    # === REMOVE AUTHENTICATION-SERVICE (AVOID NOISE) ===
+    df = df[df["service"] != "authentication-service"]
+
+    # === NEW INPUT COLS WITH ROLLING + LAG ===
+    input_cols = [
+        # Raw metrics
+        "rps_1m",
+        "cpu_norm",
+        "mem_norm",
+        
+        # Rolling windows (5m, 10m, 15m)
+        "rps_roll_mean_5m", "rps_roll_mean_10m", "rps_roll_mean_15m",
+        "cpu_roll_mean_5m", "cpu_roll_mean_10m", "cpu_roll_mean_15m",
+        "mem_roll_mean_5m", "mem_roll_mean_10m", "mem_roll_mean_15m",
+        
+        # Lags (1m, 5m, 10m)
+        "rps_lag_1m", "rps_lag_5m", "rps_lag_10m",
+        "cpu_lag_1m", "cpu_lag_5m", "cpu_lag_10m",
+        "mem_lag_1m", "mem_lag_5m", "mem_lag_10m",
+        
+        # Time features
+        "hour",
+        "dow"
+    ]
+
     target_cols = ["rps_future", "cpu_future", "mem_future"]
 
-    # Clean and scale
-    df = df.dropna(subset=input_cols + target_cols).reset_index(drop=True)
+    missing_cols = [c for c in input_cols if c not in df.columns]
+    if missing_cols:
+        print(f"[WARN] Missing columns in Silver (will fill NaN): {missing_cols}")
+
+    df = df.dropna(subset=target_cols)
+    df = df[input_cols + target_cols].dropna().reset_index(drop=True)
+
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(df[input_cols])
     y = df[target_cols].values
@@ -80,17 +106,17 @@ data:
     def make_windows(X, y, window):
         Xs, ys = [], []
         for i in range(len(X) - window):
-            Xs.append(X[i:i + window])
-            ys.append(y[i + window])
+            Xs.append(X[i:i+window])
+            ys.append(y[i+window])
         return np.array(Xs), np.array(ys)
 
     X, y = make_windows(X_scaled, y, WINDOW_SIZE)
     train_size = int(len(X) * 0.8)
+
     X_train, y_train = X[:train_size], y[:train_size]
     X_val, y_val = X[train_size:], y[train_size:]
     print(f"[INFO] X_train={X_train.shape}, y_train={y_train.shape}")
 
-    # === STEP 3: Train & Log to MLflow ===
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("lstm_forecast")
 
@@ -108,9 +134,11 @@ data:
             LSTM(128, return_sequences=True, input_shape=(WINDOW_SIZE, X.shape[2])),
             Dropout(0.2),
             LSTM(64),
-            Dense(3)  # 3 outputs: RPS, CPU, MEM
+            Dense(3)
         ])
+
         model.compile(optimizer=Adam(1e-3), loss="mae")
+
         history = model.fit(
             X_train, y_train,
             validation_data=(X_val, y_val),
@@ -119,19 +147,17 @@ data:
             verbose=1
         )
 
-        # Evaluate per-output MAPE
         y_pred = model.predict(X_val)
-        mape_rps = mean_absolute_percentage_error(y_val[:, 0], y_pred[:, 0])
-        mape_cpu = mean_absolute_percentage_error(y_val[:, 1], y_pred[:, 1])
-        mape_mem = mean_absolute_percentage_error(y_val[:, 2], y_pred[:, 2])
+        mape_rps = mean_absolute_percentage_error(y_val[:,0], y_pred[:,0])
+        mape_cpu = mean_absolute_percentage_error(y_val[:,1], y_pred[:,1])
+        mape_mem = mean_absolute_percentage_error(y_val[:,2], y_pred[:,2])
 
         mlflow.log_metric("val_mape_rps", float(mape_rps))
         mlflow.log_metric("val_mape_cpu", float(mape_cpu))
         mlflow.log_metric("val_mape_mem", float(mape_mem))
 
-        print(f"[METRICS] MAPE_RPS={mape_rps:.4f}, MAPE_CPU={mape_cpu:.4f}, MAPE_MEM={mape_mem:.4f}")
+        print(f"[METRICS] RPS={mape_rps:.4f}, CPU={mape_cpu:.4f}, MEM={mape_mem:.4f}")
 
-        # === Log + Register model ===
         mlflow.keras.log_model(
             model,
             artifact_path="model",

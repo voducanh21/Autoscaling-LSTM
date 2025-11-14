@@ -6,6 +6,7 @@ metadata:
 spec:
   schedule: "0 6 * * *"   # chạy lúc 06:00 hàng ngày
   timeZone: "Asia/Ho_Chi_Minh"
+  suspend: true
   jobTemplate:
     spec:
       template:

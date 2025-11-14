@@ -27,7 +27,7 @@ data:
     VALID_PRODUCT_ID = int(os.getenv("VALID_PRODUCT_ID", "1"))
 
     # === WEIGHT CONFIG ===
-    W_AUTH, W_PROD, W_ORDER, W_PAYMOD = 2, 20, 10, 20
+    W_AUTH, W_PROD, W_ORDER, W_PAYMOD = 1, 2, 2, 2
 
     class ApiGatewayUser(FastHttpUser):
         host = HOST
