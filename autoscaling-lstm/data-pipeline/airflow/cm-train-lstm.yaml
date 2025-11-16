@@ -6,8 +6,8 @@ metadata:
 data:
   train_lstm.py: |
     import os, sys, s3fs, pandas as pd, pyarrow.parquet as pq, numpy as np
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    from tensorflow.keras.layers import Input, Embedding, LSTM, Dense, Dropout, Concatenate
+    from tensorflow.keras.models import Model
     from tensorflow.keras.optimizers import Adam
     from sklearn.preprocessing import MinMaxScaler
     from sklearn.metrics import mean_absolute_percentage_error
@@ -20,6 +20,7 @@ data:
             print(f"{k}={v}")
     print("=======================================")
 
+    # ==== ENV ====
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -27,7 +28,7 @@ data:
     BUCKET = os.getenv("S3_BUCKET", "datalake")
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
 
-    WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
+    WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "10"))
     EPOCHS = int(os.getenv("EPOCHS", "40"))
     BATCH = int(os.getenv("BATCH_SIZE", "64"))
 
@@ -36,6 +37,7 @@ data:
     if FORCE_HTTP:
         client_args["verify"] = False
 
+    # ==== S3 FS ====
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
 
     prefix = f"{BUCKET}/{SILVER_PREFIX}/"
@@ -44,17 +46,20 @@ data:
         print(f"[ERROR] No silver folders found under {prefix}", file=sys.stderr)
         sys.exit(1)
 
+    # ==== LOAD ALL DATA ====
     dfs = []
     for path in svc_paths:
         try:
             date_part = path.split("/date=")[1].split("/")[0]
             service = path.split("/service=")[1].split("/")[0]
             parquet_files = fs.glob(f"{prefix}date={date_part}/service={service}/part-*.parquet")
+
             for f in parquet_files:
                 with fs.open(f, "rb") as fobj:
                     df = pq.read_table(fobj).to_pandas()
                     df["service"] = service
                     dfs.append(df)
+
         except Exception as e:
             print(f"[WARN] Skip {path}: {e}")
 
@@ -64,59 +69,76 @@ data:
 
     df = pd.concat(dfs, ignore_index=True)
     print(f"[OK] Loaded total {len(df)} rows from Silver layer")
+    print("Services found:", df["service"].unique())
 
-    # === REMOVE AUTHENTICATION-SERVICE (AVOID NOISE) ===
-    df = df[df["service"] != "authentication-service"]
+    print(f"[OK] Using full dataset: {len(df)} rows")
 
-    # === NEW INPUT COLS WITH ROLLING + LAG ===
+    # ============================================================
+    #               FIXED SERVICE → ID MAPPING
+    # ============================================================
+    FIXED_ORDER = [
+        "api-gateway",
+        "authentication-service",
+        "order-service",
+        "payment-service",
+        "product-service",
+    ]
+
+    # Loại bỏ service không nằm trong danh sách cố định
+    df = df[df["service"].isin(FIXED_ORDER)]
+
+    SERVICE_TO_ID = {svc: i for i, svc in enumerate(FIXED_ORDER)}
+    df["service_id"] = df["service"].map(SERVICE_TO_ID)
+
+    num_services = len(FIXED_ORDER)
+
+    print("=== FIXED SERVICE → ID MAPPING ===")
+    print(SERVICE_TO_ID)
+    print("===================================")
+
+    # ============================================================
+
+    # ==== FEATURES ====
     input_cols = [
-        # Raw metrics
-        "rps_1m",
-        "cpu_norm",
-        "mem_norm",
-        
-        # Rolling windows (5m, 10m, 15m)
+        "rps_1m", "cpu_norm", "mem_norm",
         "rps_roll_mean_5m", "rps_roll_mean_10m", "rps_roll_mean_15m",
         "cpu_roll_mean_5m", "cpu_roll_mean_10m", "cpu_roll_mean_15m",
         "mem_roll_mean_5m", "mem_roll_mean_10m", "mem_roll_mean_15m",
-        
-        # Lags (1m, 5m, 10m)
         "rps_lag_1m", "rps_lag_5m", "rps_lag_10m",
         "cpu_lag_1m", "cpu_lag_5m", "cpu_lag_10m",
         "mem_lag_1m", "mem_lag_5m", "mem_lag_10m",
-        
-        # Time features
-        "hour",
-        "dow"
+        "hour", "dow"
     ]
 
     target_cols = ["rps_future", "cpu_future", "mem_future"]
 
-    missing_cols = [c for c in input_cols if c not in df.columns]
-    if missing_cols:
-        print(f"[WARN] Missing columns in Silver (will fill NaN): {missing_cols}")
-
     df = df.dropna(subset=target_cols)
-    df = df[input_cols + target_cols].dropna().reset_index(drop=True)
+    df = df[input_cols + target_cols + ["service_id"]].dropna().reset_index(drop=True)
 
+    # ==== SCALE ====
     scaler = MinMaxScaler()
     X_scaled = scaler.fit_transform(df[input_cols])
     y = df[target_cols].values
+    svc = df["service_id"].values
 
-    def make_windows(X, y, window):
-        Xs, ys = [], []
+    # ==== WINDOWING ====
+    def make_windows(X, y, svc, window):
+        Xs, ys, svcs = [], [], []
         for i in range(len(X) - window):
             Xs.append(X[i:i+window])
             ys.append(y[i+window])
-        return np.array(Xs), np.array(ys)
+            svcs.append(svc[i:i+window])
+        return np.array(Xs), np.array(ys), np.array(svcs)
 
-    X, y = make_windows(X_scaled, y, WINDOW_SIZE)
+    X, y, S = make_windows(X_scaled, y, svc, WINDOW_SIZE)
+
     train_size = int(len(X) * 0.8)
+    X_train, y_train, S_train = X[:train_size], y[:train_size], S[:train_size]
+    X_val, y_val, S_val = X[train_size:], y[train_size:], S[train_size:]
 
-    X_train, y_train = X[:train_size], y[:train_size]
-    X_val, y_val = X[train_size:], y[train_size:]
-    print(f"[INFO] X_train={X_train.shape}, y_train={y_train.shape}")
+    print(f"[INFO] X_train={X_train.shape}, S_train={S_train.shape}")
 
+    # ==== MLFLOW ====
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("lstm_forecast")
 
@@ -127,27 +149,41 @@ data:
         mlflow.log_param("window_size", WINDOW_SIZE)
         mlflow.log_param("epochs", EPOCHS)
         mlflow.log_param("batch_size", BATCH)
-        mlflow.log_param("input_cols", ",".join(input_cols))
-        mlflow.log_param("target_cols", ",".join(target_cols))
+        mlflow.log_param("fixed_service_mapping", str(SERVICE_TO_ID))
 
-        model = Sequential([
-            LSTM(128, return_sequences=True, input_shape=(WINDOW_SIZE, X.shape[2])),
-            Dropout(0.2),
-            LSTM(64),
-            Dense(3)
-        ])
+        # ==== MODEL ====
+        ts_input = Input(shape=(WINDOW_SIZE, X.shape[2]), name="timeseries")
+        svc_input = Input(shape=(WINDOW_SIZE,), name="service_id")
 
+        emb = Embedding(
+            input_dim=num_services,
+            output_dim=4,
+            name="service_embedding"
+        )(svc_input)
+
+        merged = Concatenate(axis=-1)([ts_input, emb])
+
+        x = LSTM(128, return_sequences=True)(merged)
+        x = Dropout(0.2)(x)
+        x = LSTM(64)(x)
+        out = Dense(3)(x)
+
+        model = Model(inputs=[ts_input, svc_input], outputs=out)
         model.compile(optimizer=Adam(1e-3), loss="mae")
 
+        # ==== TRAIN ====
         history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
+            [X_train, S_train],
+            y_train,
+            validation_data=([X_val, S_val], y_val),
             epochs=EPOCHS,
             batch_size=BATCH,
             verbose=1
         )
 
-        y_pred = model.predict(X_val)
+        # ==== EVAL ====
+        y_pred = model.predict([X_val, S_val])
+
         mape_rps = mean_absolute_percentage_error(y_val[:,0], y_pred[:,0])
         mape_cpu = mean_absolute_percentage_error(y_val[:,1], y_pred[:,1])
         mape_mem = mean_absolute_percentage_error(y_val[:,2], y_pred[:,2])
@@ -156,12 +192,10 @@ data:
         mlflow.log_metric("val_mape_cpu", float(mape_cpu))
         mlflow.log_metric("val_mape_mem", float(mape_mem))
 
-        print(f"[METRICS] RPS={mape_rps:.4f}, CPU={mape_cpu:.4f}, MEM={mape_mem:.4f}")
-
         mlflow.keras.log_model(
             model,
             artifact_path="model",
             registered_model_name="lstm_forecast"
         )
 
-    print("[DONE] Training complete. Model logged & registered to MLflow Registry.")
+    print("[DONE] Training complete with FIXED service_id mapping.")

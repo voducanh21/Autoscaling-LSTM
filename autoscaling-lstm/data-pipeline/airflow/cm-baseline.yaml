@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: baseline-stats-script
+  namespace: airflow
+data:
+  baseline_stats.py: |
+    import os
+    import pandas as pd
+    import pyarrow.parquet as pq
+    import s3fs
+
+    FEATURES = ["rps_1m", "cpu_cores_1m", "mem_bytes", "hour", "dow"]
+
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+    BUCKET = os.getenv("S3_BUCKET", "datalake")
+    BRONZE_PREFIX = os.getenv("BRONZE_PREFIX", "bronze/metrics")
+    OUT_PATH = os.getenv("BASELINE_PATH", "baseline/stats.parquet")
+
+    print("[BASELINE] Starting baseline builder")
+
+    fs = s3fs.S3FileSystem(
+        key=AWS_KEY,
+        secret=AWS_SECRET,
+        client_kwargs={"endpoint_url": S3_ENDPOINT}
+    )
+
+    paths = fs.glob(f"{BUCKET}/{BRONZE_PREFIX}/date=*/service=*/part-*.parquet")
+    if not paths:
+        print("[BASELINE] No Bronze files found → exit")
+        exit(0)
+
+    dfs = []
+    for p in paths:
+        try:
+            with fs.open(p, "rb") as f:
+                df = pq.read_table(f).to_pandas()
+                dfs.append(df)
+        except:
+            pass
+
+    df = pd.concat(dfs, ignore_index=True)
+
+    print(f"[BASELINE] Loaded {len(df)} rows from Bronze")
+
+    # Compute mean + std
+    out = df[FEATURES].agg(["mean", "std"]).reset_index()
+    out.rename(columns={"index": "stat"}, inplace=True)
+
+    # Save back to S3
+    table = pa.Table.from_pandas(out)
+    with fs.open(f"{BUCKET}/{OUT_PATH}", "wb") as f:
+        pq.write_table(table, f)
+
+    print("[BASELINE] Saved:", OUT_PATH)

@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: predictor-exporter
+  name: predictor-exporter-authentication
   namespace: model
   labels:
     app: predictor-exporter
@@ -10,13 +10,15 @@ spec:
   selector:
     matchLabels:
       app: predictor-exporter
+      service: authentication-service
   template:
     metadata:
       labels:
         app: predictor-exporter
+        service: authentication-service
     spec:
       nodeSelector:
-        kubernetes.io/hostname: k3n-m03     # gắn node cố định nếu cần
+        kubernetes.io/hostname: k3n-m03
       containers:
         - name: predictor-exporter
           image: python:3.11-slim
@@ -36,11 +38,11 @@ spec:
             - name: EXPORT_PORT
               value: "9101"
             - name: INTERVAL_SECONDS
-              value: "1"           # để 60s là hợp lý cho productio
+              value: "30"
             - name: TARGET_RPS_PER_POD
-              value: "400"
+              value: "250"
             - name: APP_JOB
-              value: "api-gateway"
+              value: "authentication-service"
           ports:
             - containerPort: 9101
           resources:

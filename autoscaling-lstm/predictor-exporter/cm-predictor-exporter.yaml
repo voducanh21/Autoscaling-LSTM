@@ -18,7 +18,18 @@ data:
     EXPORT_PORT = int(os.getenv("EXPORT_PORT", "9101"))
     INTERVAL = int(os.getenv("INTERVAL_SECONDS", "1"))
     TARGET_RPS_PER_POD = float(os.getenv("TARGET_RPS_PER_POD", "400"))
-    APP_JOB = os.getenv("APP_JOB", "api-gateway")
+    APP_JOB = os.getenv("APP_JOB", "api-gateway")  # tên service trong Prometheus & mapping
+
+    # ==== FIXED SERVICE → ID MAPPING (PHẢI TRÙNG VỚI TRAIN) ====
+    SERVICE_TO_ID = {
+        "api-gateway": 0,
+        "authentication-service": 1,
+        "order-service": 2,
+        "payment-service": 3,
+        "product-service": 4,
+    }
+
+    SERVICE_ID = SERVICE_TO_ID.get(APP_JOB, 0)
 
     # === METRICS CHO KEDA ===
     g_pred_rps = Gauge("lstm_pred_rps", "Predicted RPS for next window")
@@ -26,7 +37,7 @@ data:
     g_pred_mem = Gauge("lstm_pred_mem", "Predicted Memory utilization for next window")
     g_desired_replicas = Gauge("lstm_desired_replicas", "Desired replicas from LSTM forecast")
 
-    # === MODEL INPUT (30 bước, 5 feature) ===
+    # === MODEL INPUT (WINDOW_SIZE bước, FEATURE_COUNT feature) ===
     WINDOW_SIZE = 30
     FEATURE_COUNT = 5
     buffer = deque(maxlen=WINDOW_SIZE)
@@ -43,7 +54,7 @@ data:
         return 0.0
 
     def get_current_features():
-        """Lấy 5 feature tương ứng với input_cols của model: [rps, cpu_norm, mem_norm, hour, dow]"""
+        """Lấy 5 feature tương ứng với input realtime: [rps, cpu_norm, mem_norm, hour, dow]"""
         rps = query_prom(f'svc:qps:rate1m{{job="{APP_JOB}"}}')
         cpu = query_prom(f'pod:cpu:usage1m{{namespace="apps",pod=~"{APP_JOB}-.*"}}') * 1000
         mem = query_prom(f'pod:mem:usage{{namespace="apps",pod=~"{APP_JOB}-.*"}}') / (1024 * 1024)
@@ -51,14 +62,27 @@ data:
         dow = time.localtime().tm_wday / 6.0
         return {"rps": rps, "cpu": cpu, "mem": mem, "hour": hour, "dow": dow}
 
-    def call_model(window):
-        """Gọi model LSTM → trả về [rps_future, cpu_future, mem_future]"""
-        payload = {"inputs": [window]}
+    def call_model(window, service_id: int):
+        """
+        Gọi model LSTM → trả về (rps_future, cpu_future, mem_future)
+
+        window: list[list[feature]]  shape (WINDOW_SIZE, FEATURE_COUNT)
+        service_id: int  (được lặp WINDOW_SIZE lần cho embedding)
+        """
+        svc_window = [service_id] * len(window)
+
+        # Payload kiểu mới: 2 input (timeseries + service_ids)
+        payload = {
+            "timeseries": [window],      # shape (1, W, F)
+            "service_ids": [svc_window]  # shape (1, W)
+        }
+
         try:
             r = requests.post(MODEL_ENDPOINT, json=payload, timeout=10)
             r.raise_for_status()
             data = r.json()
 
+            # Ưu tiên format có key rõ ràng
             if all(k in data for k in ["rps_future", "cpu_future", "mem_future"]):
                 return (
                     float(data["rps_future"]),
@@ -66,6 +90,7 @@ data:
                     float(data["mem_future"]),
                 )
 
+            # Fallback: format predictions cũ (giữ tương thích ngược)
             preds = data.get("predictions", [])
             if preds and isinstance(preds, list):
                 if isinstance(preds[0], list) and len(preds[0]) == 3:
@@ -92,7 +117,7 @@ data:
                 continue
 
             window = list(buffer)
-            pred_rps, pred_cpu, pred_mem = call_model(window)
+            pred_rps, pred_cpu, pred_mem = call_model(window, SERVICE_ID)
             desired = max(1, ceil(pred_rps / TARGET_RPS_PER_POD))
 
             g_pred_rps.set(pred_rps)
@@ -101,7 +126,8 @@ data:
             g_desired_replicas.set(desired)
 
             print(
-                f"[EXPORTER] OBSERVED -> rps={feats['rps']:.2f}, cpu={feats['cpu']:.2f}, mem={feats['mem']:.2f} | "
+                f"[EXPORTER] service={APP_JOB} (id={SERVICE_ID}) | "
+                f"OBSERVED -> rps={feats['rps']:.2f}, cpu={feats['cpu']:.2f}, mem={feats['mem']:.2f} | "
                 f"PREDICTED -> rps={pred_rps:.4f}, cpu={pred_cpu:.4f}, mem={pred_mem:.4f} | desired={desired}"
             )
 
@@ -112,6 +138,7 @@ data:
         print(f"[INFO] PROM_URL={PROM_URL}")
         print(f"[INFO] MODEL_ENDPOINT={MODEL_ENDPOINT}")
         print(f"[INFO] APP_JOB={APP_JOB}")
+        print(f"[INFO] SERVICE_ID={SERVICE_ID}")
         print(f"[INFO] TARGET_RPS_PER_POD={TARGET_RPS_PER_POD}")
         start_http_server(EXPORT_PORT)
         loop()

@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictor-exporter-order
+  namespace: model
+  labels:
+    app: predictor-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictor-exporter
+      service: order-service
+  template:
+    metadata:
+      labels:
+        app: predictor-exporter
+        service: order-service
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k3n-m03
+      containers:
+        - name: predictor-exporter
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              pip install --no-cache-dir prometheus_client requests
+              echo "[EXPORTER] Dependencies installed, starting exporter..."
+              exec python /app/predictor_exporter.py
+          env:
+            - name: PROM_URL
+              value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+            - name: MODEL_ENDPOINT
+              value: "http://lstm-serving.model.svc.cluster.local:8080/predict"
+            - name: EXPORT_PORT
+              value: "9101"
+            - name: INTERVAL_SECONDS
+              value: "30"
+            - name: TARGET_RPS_PER_POD
+              value: "300"
+            - name: APP_JOB
+              value: "order-service"
+          ports:
+            - containerPort: 9101
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: predictor-exporter-script
+              mountPath: /app/predictor_exporter.py
+              subPath: predictor_exporter.py
+      volumes:
+        - name: predictor-exporter-script
+          configMap:
+            name: predictor-exporter-script
