@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: baseline-stats-cronjob
+  namespace: cronjob
+spec:
+  schedule: "0 0 */7 * *"              # chạy mỗi 7 ngày (00:00)
+  suspend: true                        # bật lên khi muốn chạy thật
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: baseline-stats
+              image: python:3.11-slim
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-lc"]
+              args:
+                - >
+                  pip install -q pandas pyarrow fsspec s3fs tzdata &&
+                  python /app/baseline_stats.py
+              env:
+                - name: S3_BUCKET
+                  value: "datalake"
+
+                # baseline lưu dưới prefix riêng
+                - name: BASELINE_PREFIX
+                  value: "baseline/metrics"          # baseline chỉ lưu 1 file
+
+                # đọc dữ liệu ở bronze
+                - name: BRONZE_PREFIX
+                  value: "bronze/metrics"            # nơi chứa data raw
+
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
+              volumeMounts:
+                - name: baseline-script
+                  mountPath: /app
+                  readOnly: true
+
+          volumes:
+            - name: baseline-script
+              configMap:
+                name: baseline-stats-script      # chứa baseline_stats.py

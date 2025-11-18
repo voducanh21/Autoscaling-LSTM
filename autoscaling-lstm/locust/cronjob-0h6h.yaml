@@ -6,7 +6,6 @@ metadata:
 spec:
   schedule: "0 0 * * *"   # chạy lúc 00:00 hàng ngày
   timeZone: "Asia/Ho_Chi_Minh"
-  suspend: True
   jobTemplate:
     spec:
       template:
@@ -19,18 +18,41 @@ spec:
                 [
                   "-f", "/mnt/locust/locustfile.py",
                   "--headless",
-                  "-u", "100", "-r", "10",
+                  "-u", "1000", "-r", "10",
                   "--run-time", "6h",
                   "--host", "http://api-gateway.apps.svc.cluster.local:8888"
                 ]
               env:
                 - name: STOP_HOUR
                   value: "6"
+                - name: PROM_URL
+                  value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+                - name: USER_EMAIL
+                  value: "test1@example.com"
+                - name: USER_PASSWORD
+                  value: "password123"
+                - name: VALID_PRODUCT_ID
+                  value: "1"
+                - name: DISABLE_AUTH
+                  value: "false"
+                - name: TIMEOUT
+                  value: "5"
+                - name: CHECK_INTERVAL
+                  value: "30"
+                - name: HOST
+                  value: "http://api-gateway.apps.svc.cluster.local:8888"
               volumeMounts:
                 - name: locustfile
                   mountPath: /mnt/locust
+              resources:
+                requests:
+                  memory: "1Gi"   # Yêu cầu ít nhất 1Gi RAM
+                  cpu: "1000m"  # Yêu cầu ít nhất 1 core CPU
+                limits:
+                  memory: "2Gi" # Giới hạn tối đa 2GB RAM
+                  cpu: "3000m"  # Giới hạn tối đa 3 cores CPU
           restartPolicy: Never
           volumes:
             - name: locustfile
               configMap:
-                name: locustfile
+                name: locustfile-0h6h

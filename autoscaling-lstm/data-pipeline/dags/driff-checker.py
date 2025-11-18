@@ -7,12 +7,13 @@ with DAG(
         dag_id="drift_checker_dag",
         description="Detect drift via PSI and trigger retraining",
         start_date=datetime(2025, 10, 27),
-        schedule="0 * * * *",  # mỗi 60 phút
+        schedule="0 * * * *",   # chạy mỗi 60 phút
         catchup=False,
         max_active_runs=1,
         tags=["drift", "psi"],
 ) as dag:
 
+    # ---------- Mount ConfigMap ----------
     volume_script = k8s.V1Volume(
         name="drift-checker-script",
         config_map=k8s.V1ConfigMapVolumeSource(name="drift-checker-script")
@@ -23,23 +24,32 @@ with DAG(
         read_only=True
     )
 
+    # ---------- Drift checker Pod ----------
     drift = KubernetesPodOperator(
         task_id="drift_checker",
-        namespace="airflow",
         name="drift-checker",
+        namespace="airflow",
         image="python:3.11-slim",
+        image_pull_policy="IfNotPresent",
         cmds=["/bin/sh", "-lc"],
         arguments=[
-            "pip install pandas pyarrow numpy requests s3fs && "
+            "pip install -q pandas pyarrow numpy requests s3fs && "
             "python /app/drift_checker.py"
         ],
         env_vars={
-            "BRONZE_PREFIX": "bronze/metrics",
-            "BASELINE_PATH": "baseline/stats.parquet",
+            # ==== S3 Config ====
             "S3_BUCKET": "datalake",
-            "S3_ENDPOINT": "http://minio.minio.svc.cluster.local:9000",
-            "LOOKBACK_HOURS": "3",
+            "S3_ENDPOINT": "https://minio.voducanh.id.vn",   # dùng HTTPS (Cloudflare tunnel)
+            "BRONZE_PREFIX": "bronze/metrics",
+
+            # ==== Correct baseline path ====
+            "BASELINE_PATH": "baseline/metrics/baseline_latest.parquet",
+
+            # ==== PSI Config ====
+            "LOOKBACK_HOURS": "1",       # mỗi 1 giờ đọc lại dữ liệu 1 giờ gần nhất
             "PSI_THRESHOLD": "0.25",
+
+            # ==== Airflow API ====
             "AIRFLOW_URL": "http://airflow-api-server.airflow.svc.cluster.local:8080",
             "AIRFLOW_USERNAME": "admin",
             "AIRFLOW_PASSWORD": "admin",
@@ -53,4 +63,5 @@ with DAG(
         node_selector={"kubernetes.io/hostname": "k3n-m03"},
         is_delete_operator_pod=True,
         get_logs=True,
+        in_cluster=True,
     )

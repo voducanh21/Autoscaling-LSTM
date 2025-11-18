@@ -2,56 +2,93 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: baseline-stats-script
-  namespace: airflow
+  namespace: cronjob
 data:
   baseline_stats.py: |
     import os
-    import pandas as pd
-    import pyarrow.parquet as pq
+    import sys
     import s3fs
-
-    FEATURES = ["rps_1m", "cpu_cores_1m", "mem_bytes", "hour", "dow"]
-
-    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
-    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
-    BUCKET = os.getenv("S3_BUCKET", "datalake")
-    BRONZE_PREFIX = os.getenv("BRONZE_PREFIX", "bronze/metrics")
-    OUT_PATH = os.getenv("BASELINE_PATH", "baseline/stats.parquet")
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from datetime import datetime, timezone
 
     print("[BASELINE] Starting baseline builder")
 
+    # ==== ENV ====
+    BUCKET      = os.getenv("S3_BUCKET", "datalake")
+    PREFIX_IN   = os.getenv("BRONZE_PREFIX", "bronze/metrics")
+    PREFIX_OUT  = os.getenv("BASELINE_PREFIX", "baseline/metrics")
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY     = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET  = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+    # ==== S3 FS ====
     fs = s3fs.S3FileSystem(
         key=AWS_KEY,
         secret=AWS_SECRET,
         client_kwargs={"endpoint_url": S3_ENDPOINT}
     )
 
-    paths = fs.glob(f"{BUCKET}/{BRONZE_PREFIX}/date=*/service=*/part-*.parquet")
-    if not paths:
-        print("[BASELINE] No Bronze files found → exit")
-        exit(0)
+    # ==== 1. Collect ALL bronze files ====
+    bronze_root = f"{BUCKET}/{PREFIX_IN}"
+    files = fs.glob(f"{bronze_root}/date=*/service=*/part-*.parquet")
 
+    if not files:
+        print("[ERROR] No bronze parquet files found")
+        sys.exit(1)
+
+    print(f"[BASELINE] Found {len(files)} bronze files")
+
+    # ==== 2. Load all bronze rows ====
     dfs = []
-    for p in paths:
+    for f in files:
         try:
-            with fs.open(p, "rb") as f:
-                df = pq.read_table(f).to_pandas()
+            with fs.open(f, "rb") as fobj:
+                df = pq.read_table(fobj).to_pandas()
                 dfs.append(df)
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] Failed to read {f}: {e}")
+
+    if not dfs:
+        print("[ERROR] No valid bronze data")
+        sys.exit(1)
 
     df = pd.concat(dfs, ignore_index=True)
-
     print(f"[BASELINE] Loaded {len(df)} rows from Bronze")
 
-    # Compute mean + std
-    out = df[FEATURES].agg(["mean", "std"]).reset_index()
-    out.rename(columns={"index": "stat"}, inplace=True)
+    # ==== 3. Select numeric columns ====
+    numeric_cols = ["rps_1m", "cpu_cores_1m", "mem_bytes"]
 
-    # Save back to S3
+    base = {}
+    for col in numeric_cols:
+        series = df[col].astype(float)
+
+        base[col] = {
+            "metric": col,
+            "mean": series.mean(),
+            "std":  series.std(),
+            "min":  series.min(),
+            "max":  series.max(),
+            "p10":  series.quantile(0.10),
+            "p50":  series.quantile(0.50),
+            "p90":  series.quantile(0.90),
+        }
+
+    out = pd.DataFrame(base.values())
+
+    # ==== 4. ROUND numbers for readability ====
+    out = out.round(6)
+
+    print("[BASELINE] Final stats:")
+    print(out)
+
+    # ==== 5. Write to Parquet ====
+    path = f"{BUCKET}/{PREFIX_OUT}/baseline_latest.parquet"
+
     table = pa.Table.from_pandas(out)
-    with fs.open(f"{BUCKET}/{OUT_PATH}", "wb") as f:
-        pq.write_table(table, f)
+    with fs.open(path, "wb") as fobj:
+        pq.write_table(table, fobj)
 
-    print("[BASELINE] Saved:", OUT_PATH)
+    print(f"[BASELINE] Wrote baseline to s3://{path}")
+    print("[BASELINE] Done")
