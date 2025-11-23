@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payment-service-lstm-scaler
+  namespace: apps
+spec:
+  scaleTargetRef:
+    name: payment-service
+  minReplicaCount: 1
+  maxReplicaCount: 12
+  pollingInterval: 30
+  cooldownPeriod: 300
+
+  triggers:
+    - type: external
+      metadata:
+        scalerAddress: predictor-exporter-payment-service.model.svc.cluster.local:9101
+        metricName: lstm_pred_rps_payment_service
+        targetValue: "200"

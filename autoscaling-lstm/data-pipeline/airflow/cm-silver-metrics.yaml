@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: silver-metrics-script
-  namespace: airflow
+  namespace: cronjob
 data:
   silver_builder.py: |
     # 🥈 Silver Layer — build normalized, rolling, lag, and future-target features from Bronze
@@ -25,8 +25,16 @@ data:
     ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[5,10,15]"))
     LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,5,10]"))
     HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
-    CPU_LIMIT = float(os.getenv("CPU_LIMIT_CORES", "1.0"))
     MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1 GiB default
+
+    # === PER-SERVICE CPU LIMIT ===
+    CPU_LIMIT_MAP = {
+        "api-gateway": 1.5,
+        "authentication-service": 1.0,
+        "order-service": 1.0,
+        "payment-service": 1.0,
+        "product-service": 1.0,
+    }
 
     try:
         TZ = ZoneInfo(TZ_NAME)
@@ -39,8 +47,10 @@ data:
         "client_kwargs": {"endpoint_url": S3_ENDPOINT},
     }
 
-    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET,
-                           client_kwargs={"endpoint_url": S3_ENDPOINT})
+    fs = s3fs.S3FileSystem(
+        key=AWS_KEY, secret=AWS_SECRET,
+        client_kwargs={"endpoint_url": S3_ENDPOINT},
+    )
 
     # === STEP 1: READ BRONZE (last 15 minutes) ===
     def read_bronze():
@@ -77,11 +87,15 @@ data:
                     with fs.open(fpath, "rb") as fobj:
                         df = pq.read_table(fobj).to_pandas()
                         dfs.append(df)
+
                 print(f"[INFO] Loaded {len(recent)} files for {svc} ({d})")
+
             except Exception as e:
                 print(f"[WARN] Skip {path}: {e}")
+
         if not dfs:
             raise RuntimeError("No Bronze data found in recent 15-minute window")
+
         return pd.concat(dfs, ignore_index=True)
 
     # === STEP 2: CLEAN + NORMALIZE SCHEMA ===
@@ -93,10 +107,18 @@ data:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=["ts", "service"])
 
-        df["cpu_norm"] = df["cpu_cores_1m"] / CPU_LIMIT
+        # NORMALIZE CPU THEO TỪNG SERVICE
+        df["cpu_norm"] = df.apply(
+            lambda r: r["cpu_cores_1m"] / CPU_LIMIT_MAP.get(r["service"], 1.0),
+            axis=1
+        )
+
+        # Normalize memory như cũ
         df["mem_norm"] = df["mem_bytes"] / MEM_LIMIT
+
         df["hour"] = df["ts"].dt.tz_convert(TZ).dt.hour
         df["dow"] = df["ts"].dt.tz_convert(TZ).dt.weekday
+
         return df.sort_values("ts")
 
     # === STEP 3: FEATURE ENGINEERING ===
@@ -126,6 +148,7 @@ data:
         g.index = g.index.tz_convert(TZ)
         g["hour"] = g.index.hour
         g["dow"] = g.index.weekday
+
         return g.reset_index().rename(columns={"index": "ts"})
 
     # === STEP 4: WRITE SILVER ===
@@ -133,8 +156,10 @@ data:
         if df.empty:
             print("[WARN] No rows to write.")
             return
+
         df["date"] = df["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
         part = int(datetime.now(timezone.utc).timestamp())
+
         for svc, sub in df.groupby("service"):
             for d, sub2 in sub.groupby("date"):
                 path = f"s3://{BUCKET}/{SILVER_PREF}/date={d}/service={svc}/part-{part}.parquet"
@@ -159,6 +184,7 @@ data:
             df_final = df_final.drop_duplicates(subset=["service", "ts"], keep="last")
             write_silver(df_final)
             print("[INFO] Silver pipeline completed successfully.")
+
         except Exception as e:
             print(f"[ERROR] {e}", file=sys.stderr)
             sys.exit(1)

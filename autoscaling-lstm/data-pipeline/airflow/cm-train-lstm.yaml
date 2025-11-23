@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: train-lstm-script
-  namespace: cronjob
+  namespace: airflow
 data:
   train_lstm.py: |
     import os, sys, s3fs, pandas as pd, pyarrow.parquet as pq, numpy as np
@@ -184,6 +184,7 @@ data:
         # ==== EVAL ====
         y_pred = model.predict([X_val, S_val])
 
+        # --- MAPE tổng ---
         mape_rps = mean_absolute_percentage_error(y_val[:,0], y_pred[:,0])
         mape_cpu = mean_absolute_percentage_error(y_val[:,1], y_pred[:,1])
         mape_mem = mean_absolute_percentage_error(y_val[:,2], y_pred[:,2])
@@ -192,6 +193,32 @@ data:
         mlflow.log_metric("val_mape_cpu", float(mape_cpu))
         mlflow.log_metric("val_mape_mem", float(mape_mem))
 
+        # =====================================================
+        #            MAPE RIÊNG TỪNG SERVICE (DEBUG)
+        # =====================================================
+        print("=== PER-SERVICE MAPE (RPS ONLY) ===")
+
+        S_last = S_val[:, -1]  # service_id tại sample predict
+
+        for svc_name, svc_id in SERVICE_TO_ID.items():
+            mask = (S_last == svc_id)
+            if mask.sum() == 0:
+                print(f"[WARN] No validation samples for {svc_name}")
+                continue
+
+            svc_mape = mean_absolute_percentage_error(
+                y_val[mask, 0],
+                y_pred[mask, 0]
+            )
+
+            metric_name = f"val_mape_rps_{svc_name.replace('-', '_')}"
+            mlflow.log_metric(metric_name, float(svc_mape))
+
+            print(f"{svc_name}: {svc_mape:.4f}")
+
+        print("===================================")
+
+        # ---- LOG MODEL ----
         mlflow.keras.log_model(
             model,
             artifact_path="model",

@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-service-lstm-scaler
+  namespace: apps
+spec:
+  scaleTargetRef:
+    name: order-service
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  pollingInterval: 30
+  cooldownPeriod: 300
+
+  triggers:
+    - type: external
+      metadata:
+        scalerAddress: predictor-exporter-order-service.model.svc.cluster.local:9101
+        metricName: lstm_pred_rps_order_service
+        targetValue: "300"

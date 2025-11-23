@@ -33,7 +33,11 @@ spec:
               cpu: "250m"
               memory: "256Mi"
             limits:
+<<<<<<< HEAD
               cpu: "2000m"
+=======
+              cpu: "1500m"
+>>>>>>> c6a5112 (23/11 DucBi)
               memory: "1Gi"
           env:
             - name: PRODUCT_SERVICE_URL

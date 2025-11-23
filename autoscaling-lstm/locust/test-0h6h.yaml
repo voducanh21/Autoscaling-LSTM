@@ -127,7 +127,11 @@ spec:
                 [
                   "-f", "/mnt/locust/locustfile.py",
                   "--headless",
+<<<<<<< HEAD
                   "-u", "1500",
+=======
+                  "-u", "150m0",
+>>>>>>> c6a5112 (23/11 DucBi)
                   "-r", "100",
                   "--run-time", "15m",
                   "--host", "http://api-gateway.apps.svc.cluster.local:8888"

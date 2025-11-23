@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: authentication-service-lstm-scaler
+  namespace: apps
+spec:
+  scaleTargetRef:
+    name: authentication-service
+  minReplicaCount: 1
+  maxReplicaCount: 15
+  pollingInterval: 30
+  cooldownPeriod: 300
+
+  triggers:
+    - type: external
+      metadata:
+        scalerAddress: predictor-exporter-authentication.model.svc.cluster.local:9101
+        metricName: lstm_pred_rps_authentication_service
+        targetValue: "400"

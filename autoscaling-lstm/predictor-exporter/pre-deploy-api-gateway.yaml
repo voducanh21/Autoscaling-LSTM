@@ -5,6 +5,7 @@ metadata:
   namespace: model
   labels:
     app: predictor-exporter
+    service: api-gateway
 spec:
   replicas: 1
   selector:
@@ -38,13 +39,14 @@ spec:
             - name: EXPORT_PORT
               value: "9101"
             - name: INTERVAL_SECONDS
-              value: "30"
+              value: "5"
             - name: TARGET_RPS_PER_POD
               value: "400"
             - name: APP_JOB
               value: "api-gateway"
           ports:
             - containerPort: 9101
+              name: http-metrics
           resources:
             requests:
               cpu: "100m"
@@ -60,3 +62,44 @@ spec:
         - name: predictor-exporter-script
           configMap:
             name: predictor-exporter-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: predictor-exporter-api-gateway
+  namespace: model
+  labels:
+    app: predictor-exporter
+    service: api-gateway
+    release: kube-prometheus   # <-- BẮT BUỘC PHẢI CÓ
+spec:
+  type: ClusterIP
+  ports:
+    - name: http-metrics
+      port: 9101
+      targetPort: 9101
+  selector:
+    app: predictor-exporter
+    service: api-gateway
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: predictor-exporter-api-gateway
+  namespace: model
+  labels:
+    release: kube-prometheus      # <-- MATCH Prometheus Selector
+spec:
+  jobLabel: app
+  namespaceSelector:
+    matchNames:
+      - model
+  selector:
+    matchLabels:
+      app: predictor-exporter
+      service: api-gateway
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
