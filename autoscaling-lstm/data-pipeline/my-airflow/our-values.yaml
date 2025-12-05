@@ -11,8 +11,8 @@ mysql:
     persistence:
       enabled: true
       size: 5Gi
-      storageClass: local-path
-    resources:
+      storageClass: nfs-rwx
+    resources:            # thêm CPU/memory
       requests:
         cpu: 800m
         memory: 1Gi
@@ -40,11 +40,10 @@ airflow:
   defaultAirflowTag: "3.0.6"
   airflowVersion: "3.0.6"
 
+  # Disable Celery worker dependencies
   executor: KubernetesExecutor
-
   postgresql:
     enabled: false
-
   workers:
     replicas: 0
 
@@ -63,22 +62,13 @@ airflow:
       port: 3306
       host: "airflow-mysql.airflow.svc.cluster.local"
 
-  #########################################################################
-  # ✔ SECRET KEY + FERNET KEY – ĐÚNG SCHEMA, KHÔNG LỖI HELM
-  #########################################################################
-
   config:
     core:
-      secret_key: "ducanh-super-secret-key-1234567890"
-      fernet_key: "qIUz4MTSqUehzQwO7G8v3BdS5ItPlqrQkF5rRprtVsc="
       load_examples: "False"
 
-    api:
-      secret_key: "ducanh-super-secret-key-1234567890"
-
-  #########################################################################
-  # ✔ GIT SYNC
-  #########################################################################
+  extraEnv: |
+    - name: AIRFLOW__CORE__LOAD_EXAMPLES
+      value: "False"
 
   dags:
     gitSync:
@@ -89,19 +79,7 @@ airflow:
       wait: 30
       credentialsSecret: airflow-git-secret
 
-  #########################################################################
-  # ✔ API SERVER – COMMAND CHUẨN AIRFLOW 3.X
-  #########################################################################
-
   api:
-    command:
-      - "bash"
-      - "-c"
-      - |
-        exec airflow http \
-          --host 0.0.0.0 \
-          --port 8080
-
     resources:
       requests:
         cpu: 500m
@@ -136,3 +114,5 @@ airflow:
       periodSeconds: 20
       timeoutSeconds: 10
       failureThreshold: 5
+
+

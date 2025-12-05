@@ -16,38 +16,20 @@ data:
     PROM_URL = os.getenv("PROM_URL", "http://prometheus-operated.monitoring.svc.cluster.local:9090")
     MODEL_ENDPOINT = os.getenv("MODEL_ENDPOINT", "http://lstm-serving.model.svc.cluster.local:8080/predict")
     EXPORT_PORT = int(os.getenv("EXPORT_PORT", "9101"))
-    INTERVAL = int(os.getenv("INTERVAL_SECONDS", "60"))
+    INTERVAL = int(os.getenv("INTERVAL_SECONDS", "1"))
     TARGET_RPS_PER_POD = float(os.getenv("TARGET_RPS_PER_POD", "400"))
     APP_JOB = os.getenv("APP_JOB", "api-gateway")
 
-    # ===== FIXED SERVICE → ID MAPPING =====
-    SERVICE_TO_ID = {
-        "api-gateway": 0,
-        "authentication-service": 1,
-        "order-service": 2,
-        "payment-service": 3,
-        "product-service": 4,
-    }
-    SERVICE_ID = SERVICE_TO_ID.get(APP_JOB, 0)
+    # === METRICS CHO KEDA ===
+    g_pred_rps = Gauge("lstm_pred_rps", "Predicted RPS for next window")
+    g_pred_cpu = Gauge("lstm_pred_cpu", "Predicted CPU utilization for next window")
+    g_pred_mem = Gauge("lstm_pred_mem", "Predicted Memory utilization for next window")
+    g_desired_replicas = Gauge("lstm_desired_replicas", "Desired replicas from LSTM forecast")
 
-    # === METRICS (CÓ LABEL service) ===
-    g_pred_rps = Gauge("lstm_pred_rps", "Predicted RPS for next window", ["service"])
-    g_pred_cpu = Gauge("lstm_pred_cpu", "Predicted CPU utilization for next window", ["service"])
-    g_pred_mem = Gauge("lstm_pred_mem", "Predicted Memory utilization for next window", ["service"])
-    g_desired_replicas = Gauge("lstm_desired_replicas", "Desired replicas from LSTM forecast", ["service"])
-
-    # === WINDOW CONFIG ===
+    # === MODEL INPUT (30 bước, 5 feature) ===
     WINDOW_SIZE = 30
-    FEATURE_COUNT = 23
-
-    EXTRA_HISTORY = 20
-    HISTORY_LEN = WINDOW_SIZE + EXTRA_HISTORY
-
-    rps_hist = deque(maxlen=HISTORY_LEN)
-    cpu_hist = deque(maxlen=HISTORY_LEN)
-    mem_hist = deque(maxlen=HISTORY_LEN)
-    hour_hist = deque(maxlen=HISTORY_LEN)
-    dow_hist = deque(maxlen=HISTORY_LEN)
+    FEATURE_COUNT = 5
+    buffer = deque(maxlen=WINDOW_SIZE)
 
     def query_prom(query: str) -> float:
         try:
@@ -60,90 +42,18 @@ data:
             print(f"[PROM] query failed: {query} → {e}")
         return 0.0
 
-    def get_current_base_features():
+    def get_current_features():
+        """Lấy 5 feature tương ứng với input_cols của model: [rps, cpu_norm, mem_norm, hour, dow]"""
         rps = query_prom(f'svc:qps:rate1m{{job="{APP_JOB}"}}')
         cpu = query_prom(f'pod:cpu:usage1m{{namespace="apps",pod=~"{APP_JOB}-.*"}}') * 1000
         mem = query_prom(f'pod:mem:usage{{namespace="apps",pod=~"{APP_JOB}-.*"}}') / (1024 * 1024)
-
         hour = time.localtime().tm_hour / 23.0
         dow = time.localtime().tm_wday / 6.0
+        return {"rps": rps, "cpu": cpu, "mem": mem, "hour": hour, "dow": dow}
 
-        return rps, cpu, mem, hour, dow
-
-    def build_feature_window():
-        rps_arr = list(rps_hist)
-        cpu_arr = list(cpu_hist)
-        mem_arr = list(mem_hist)
-        hour_arr = list(hour_hist)
-        dow_arr = list(dow_hist)
-
-        N = len(rps_arr)
-        min_history = WINDOW_SIZE + 14
-        if N < min_history:
-            print(f"[EXPORTER] Not enough history: {N}/{min_history}")
-            return None
-
-        start = N - WINDOW_SIZE
-        if start < 14:
-            return None
-
-        window_feats = []
-
-        for t in range(start, N):
-            rps = rps_arr[t]
-            cpu = cpu_arr[t]
-            mem = mem_arr[t]
-
-            rps_rm5  = sum(rps_arr[t-4:t+1]) / 5.0
-            rps_rm10 = sum(rps_arr[t-9:t+1]) / 10.0
-            rps_rm15 = sum(rps_arr[t-14:t+1]) / 15.0
-
-            cpu_rm5  = sum(cpu_arr[t-4:t+1]) / 5.0
-            cpu_rm10 = sum(cpu_arr[t-9:t+1]) / 10.0
-            cpu_rm15 = sum(cpu_arr[t-14:t+1]) / 15.0
-
-            mem_rm5  = sum(mem_arr[t-4:t+1]) / 5.0
-            mem_rm10 = sum(mem_arr[t-9:t+1]) / 10.0
-            mem_rm15 = sum(mem_arr[t-14:t+1]) / 15.0
-
-            rps_lag1  = rps_arr[t-1]
-            rps_lag5  = rps_arr[t-5]
-            rps_lag10 = rps_arr[t-10]
-
-            cpu_lag1  = cpu_arr[t-1]
-            cpu_lag5  = cpu_arr[t-5]
-            cpu_lag10 = cpu_arr[t-10]
-
-            mem_lag1  = mem_arr[t-1]
-            mem_lag5  = mem_arr[t-5]
-            mem_lag10 = mem_arr[t-10]
-
-            hour = hour_arr[t]
-            dow = dow_arr[t]
-
-            features = [
-                rps, cpu, mem,
-                rps_rm5, rps_rm10, rps_rm15,
-                cpu_rm5, cpu_rm10, cpu_rm15,
-                mem_rm5, mem_rm10, mem_rm15,
-                rps_lag1, rps_lag5, rps_lag10,
-                cpu_lag1, cpu_lag5, cpu_lag10,
-                mem_lag1, mem_lag5, mem_lag10,
-                hour, dow,
-            ]
-
-            window_feats.append(features)
-
-        return window_feats
-
-    def call_model(window, service_id: int):
-        svc_window = [service_id] * len(window)
-
-        payload = {
-            "timeseries": [window],
-            "service_id": [svc_window]
-        }
-
+    def call_model(window):
+        """Gọi model LSTM → trả về [rps_future, cpu_future, mem_future]"""
+        payload = {"inputs": [window]}
         try:
             r = requests.post(MODEL_ENDPOINT, json=payload, timeout=10)
             r.raise_for_status()
@@ -157,41 +67,41 @@ data:
                 )
 
             preds = data.get("predictions", [])
-            if isinstance(preds, list):
+            if preds and isinstance(preds, list):
+                if isinstance(preds[0], list) and len(preds[0]) == 3:
+                    return tuple(map(float, preds[0]))
                 if len(preds) == 3:
                     return tuple(map(float, preds))
         except Exception as e:
             print(f"[MODEL] call failed: {e}")
-
         return (0.0, 0.0, 0.0)
 
     def loop():
+        """Thu thập feature → gọi model → cập nhật Prometheus metrics"""
         while True:
-            rps, cpu, mem, hour, dow = get_current_base_features()
-
-            rps_hist.append(rps)
-            cpu_hist.append(cpu)
-            mem_hist.append(mem)
-            hour_hist.append(hour)
-            dow_hist.append(dow)
-
-            window = build_feature_window()
-            if window is None:
-                print(f"[EXPORTER] Warming up history: {len(rps_hist)}/{WINDOW_SIZE + 14}")
+            feats = get_current_features()
+            if len(feats) != FEATURE_COUNT:
+                print(f"[WARN] Feature length mismatch: {len(feats)}")
                 time.sleep(INTERVAL)
                 continue
 
-            pred_rps, pred_cpu, pred_mem = call_model(window, SERVICE_ID)
+            buffer.append(list(feats.values()))
+            if len(buffer) < WINDOW_SIZE:
+                print(f"[EXPORTER] Warming up {len(buffer)}/{WINDOW_SIZE} steps...")
+                time.sleep(INTERVAL)
+                continue
+
+            window = list(buffer)
+            pred_rps, pred_cpu, pred_mem = call_model(window)
             desired = max(1, ceil(pred_rps / TARGET_RPS_PER_POD))
 
-            g_pred_rps.labels(service=APP_JOB).set(pred_rps)
-            g_pred_cpu.labels(service=APP_JOB).set(pred_cpu)
-            g_pred_mem.labels(service=APP_JOB).set(pred_mem)
-            g_desired_replicas.labels(service=APP_JOB).set(desired)
+            g_pred_rps.set(pred_rps)
+            g_pred_cpu.set(pred_cpu)
+            g_pred_mem.set(pred_mem)
+            g_desired_replicas.set(desired)
 
             print(
-                f"[EXPORTER] service={APP_JOB} (id={SERVICE_ID}) | "
-                f"OBSERVED -> rps={rps:.2f}, cpu={cpu:.2f}, mem={mem:.2f} | "
+                f"[EXPORTER] OBSERVED -> rps={feats['rps']:.2f}, cpu={feats['cpu']:.2f}, mem={feats['mem']:.2f} | "
                 f"PREDICTED -> rps={pred_rps:.4f}, cpu={pred_cpu:.4f}, mem={pred_mem:.4f} | desired={desired}"
             )
 
@@ -202,9 +112,6 @@ data:
         print(f"[INFO] PROM_URL={PROM_URL}")
         print(f"[INFO] MODEL_ENDPOINT={MODEL_ENDPOINT}")
         print(f"[INFO] APP_JOB={APP_JOB}")
-        print(f"[INFO] SERVICE_ID={SERVICE_ID}")
         print(f"[INFO] TARGET_RPS_PER_POD={TARGET_RPS_PER_POD}")
-        print(f"[INFO] WINDOW_SIZE={WINDOW_SIZE}, FEATURE_COUNT={FEATURE_COUNT}")
-
         start_http_server(EXPORT_PORT)
         loop()

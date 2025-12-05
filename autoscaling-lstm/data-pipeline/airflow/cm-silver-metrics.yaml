@@ -5,16 +5,14 @@ metadata:
   namespace: cronjob
 data:
   silver_builder.py: |
-    # 🥈 Silver Layer — build normalized, rolling, lag, and future-target features from Bronze
-    import os, sys, json
+    import os, sys
     import pandas as pd
     import s3fs
     import pyarrow.parquet as pq
     import numpy as np
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
-    # === ENVIRONMENT ===
     BUCKET = os.getenv("S3_BUCKET", "datalake")
     BRONZE_PREF = os.getenv("BRONZE_PREFIX", "bronze/metrics")
     SILVER_PREF = os.getenv("SILVER_PREFIX", "silver/metrics")
@@ -22,12 +20,10 @@ data:
     AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
     AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
-    ROLL_LIST = json.loads(os.getenv("ROLL_WINDOWS", "[5,10,15]"))
-    LAG_LIST = json.loads(os.getenv("LAG_MINUTES", "[1,5,10]"))
-    HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
-    MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1 GiB default
 
-    # === PER-SERVICE CPU LIMIT ===
+    # horizon in minutes for future prediction
+    HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
+
     CPU_LIMIT_MAP = {
         "api-gateway": 1.5,
         "authentication-service": 1.0,
@@ -36,9 +32,11 @@ data:
         "product-service": 1.0,
     }
 
+    MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))
+
     try:
         TZ = ZoneInfo(TZ_NAME)
-    except Exception:
+    except:
         TZ = timezone.utc
 
     storage_opts = {
@@ -52,106 +50,112 @@ data:
         client_kwargs={"endpoint_url": S3_ENDPOINT},
     )
 
-    # === STEP 1: READ BRONZE (last 15 minutes) ===
-    def read_bronze():
-        prefix = f"{BUCKET}/{BRONZE_PREF}/"
-        now = datetime.now(timezone.utc)
-        min_time = now - timedelta(minutes=15)
-        print(f"[INFO] Collecting Bronze files newer than {min_time.astimezone(TZ)}")
+    # ============================================================
+    # Helpers
+    # ============================================================
 
-        svc_paths = fs.glob(prefix + "date=*/service=*/")
-        if not svc_paths:
-            raise RuntimeError("No bronze folders found")
+    def list_dates():
+        prefix = f"{BUCKET}/{BRONZE_PREF}/"
+        paths = fs.glob(prefix + "date=*/service=*/")
+
+        dates = sorted({
+            path.split("date=")[1].split("/")[0]
+            for path in paths
+            if "date=" in path
+        })
+
+        return dates
+
+    def read_bronze_day(day):
+        prefix = f"{BUCKET}/{BRONZE_PREF}/date={day}/"
+        svc_paths = fs.glob(prefix + "service=*/")
 
         dfs = []
         for path in svc_paths:
-            try:
-                d = path.split("/date=")[1].split("/")[0]
-                svc = path.split("/service=")[1].split("/")[0]
-                files = fs.glob(f"{prefix}date={d}/service={svc}/part-*.parquet")
+            svc = path.split("/service=")[1].split("/")[0]
+            files = fs.glob(f"{prefix}service={svc}/part-*.parquet")
 
-                recent = []
-                for f in files:
-                    try:
-                        info = fs.info(f)
-                        if "LastModified" in info:
-                            if info["LastModified"] >= min_time:
-                                recent.append(f)
-                        else:
-                            recent.append(f)
-                    except Exception as e:
-                        print(f"[WARN] Could not read metadata for {f}: {e}")
-                        recent.append(f)
-
-                for fpath in recent:
-                    with fs.open(fpath, "rb") as fobj:
+            for f in files:
+                try:
+                    with fs.open(f, "rb") as fobj:
                         df = pq.read_table(fobj).to_pandas()
                         dfs.append(df)
-
-                print(f"[INFO] Loaded {len(recent)} files for {svc} ({d})")
-
-            except Exception as e:
-                print(f"[WARN] Skip {path}: {e}")
+                except Exception as e:
+                    print(f"[WARN] Skip file {f}: {e}")
 
         if not dfs:
-            raise RuntimeError("No Bronze data found in recent 15-minute window")
+            return None
 
         return pd.concat(dfs, ignore_index=True)
 
-    # === STEP 2: CLEAN + NORMALIZE SCHEMA ===
+    # ============================================================
+    # Schema + Normalization
+    # ============================================================
+
     def enforce_schema(df):
         df = df.copy()
+
         df["service"] = df["service"].astype(str)
         df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+
         for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
         df = df.dropna(subset=["ts", "service"])
 
-        # NORMALIZE CPU THEO TỪNG SERVICE
         df["cpu_norm"] = df.apply(
             lambda r: r["cpu_cores_1m"] / CPU_LIMIT_MAP.get(r["service"], 1.0),
             axis=1
         )
 
-        # Normalize memory như cũ
         df["mem_norm"] = df["mem_bytes"] / MEM_LIMIT
-
-        df["hour"] = df["ts"].dt.tz_convert(TZ).dt.hour
-        df["dow"] = df["ts"].dt.tz_convert(TZ).dt.weekday
 
         return df.sort_values("ts")
 
-    # === STEP 3: FEATURE ENGINEERING ===
+    # ============================================================
+    # Feature Engineering (reduced + target)
+    # ============================================================
+
     def add_features(g):
         g = g.drop_duplicates(subset=["ts"])
         g = g.set_index("ts").asfreq("1min")
 
+        # raw metrics
         for c in ["rps_1m", "latency_p95_ms", "cpu_norm", "mem_norm"]:
             g[c] = g[c].ffill().bfill()
 
-        for w in ROLL_LIST:
-            g[f"rps_roll_mean_{w}m"] = g["rps_1m"].rolling(f"{w}min").mean()
-            g[f"cpu_roll_mean_{w}m"] = g["cpu_norm"].rolling(f"{w}min").mean()
-            g[f"mem_roll_mean_{w}m"] = g["mem_norm"].rolling(f"{w}min").mean()
+        # rolling
+        g["rps_roll_mean_5m"] = g["rps_1m"].rolling("5min").mean()
+        g["rps_roll_mean_15m"] = g["rps_1m"].rolling("15min").mean()
 
-        for l in LAG_LIST:
-            g[f"rps_lag_{l}m"] = g["rps_1m"].shift(l)
-            g[f"cpu_lag_{l}m"] = g["cpu_norm"].shift(l)
-            g[f"mem_lag_{l}m"] = g["mem_norm"].shift(l)
+        # lag
+        g["rps_lag_1m"] = g["rps_1m"].shift(1)
+        g["cpu_lag_1m"] = g["cpu_norm"].shift(1)
+        g["mem_lag_1m"] = g["mem_norm"].shift(1)
 
+        # target (future)
         g["rps_future"] = g["rps_1m"].shift(-HORIZON)
         g["cpu_future"] = g["cpu_norm"].shift(-HORIZON)
         g["mem_future"] = g["mem_norm"].shift(-HORIZON)
 
-        g = g.replace([np.inf, -np.inf], np.nan).fillna(method="bfill").fillna(method="ffill")
+        # cleanup
+        g.replace([np.inf, -np.inf], np.nan, inplace=True)
+        g = g.fillna(method="bfill").fillna(method="ffill")
+
+        # drop rows missing target
         g = g.dropna(subset=["rps_future", "cpu_future", "mem_future"])
+
+        # restore timestamp
         g.index = g.index.tz_convert(TZ)
         g["hour"] = g.index.hour
         g["dow"] = g.index.weekday
 
         return g.reset_index().rename(columns={"index": "ts"})
 
-    # === STEP 4: WRITE SILVER ===
+    # ============================================================
+    # Write Partitioned Silver
+    # ============================================================
+
     def write_silver(df):
         if df.empty:
             print("[WARN] No rows to write.")
@@ -163,6 +167,7 @@ data:
         for svc, sub in df.groupby("service"):
             for d, sub2 in sub.groupby("date"):
                 path = f"s3://{BUCKET}/{SILVER_PREF}/date={d}/service={svc}/part-{part}.parquet"
+
                 sub2.drop(columns=["date"]).to_parquet(
                     path,
                     index=False,
@@ -170,24 +175,38 @@ data:
                     storage_options=storage_opts,
                     use_dictionary=False,
                 )
+
                 print(f"[OK] wrote {path} (rows={len(sub2)})")
 
-    # === MAIN ===
+    # ============================================================
+    # Main
+    # ============================================================
+
     def main():
-        try:
-            df_bronze = read_bronze()
-            df_clean = enforce_schema(df_bronze)
+        dates = list_dates()
+        print(f"[INFO] Found {len(dates)} dates: {dates}")
+
+        for d in dates:
+            print(f"[INFO] Processing date: {d}")
+
+            df = read_bronze_day(d)
+            if df is None:
+                print(f"[WARN] No data for date: {d}")
+                continue
+
+            df_clean = enforce_schema(df)
+
             result = []
             for svc, g in df_clean.groupby("service"):
                 result.append(add_features(g))
+
             df_final = pd.concat(result, ignore_index=True)
             df_final = df_final.drop_duplicates(subset=["service", "ts"], keep="last")
-            write_silver(df_final)
-            print("[INFO] Silver pipeline completed successfully.")
 
-        except Exception as e:
-            print(f"[ERROR] {e}", file=sys.stderr)
-            sys.exit(1)
+            write_silver(df_final)
+            print(f"[OK] Completed Silver for date={d}")
+
+        print("[INFO] Silver pipeline finished.")
 
     if __name__ == "__main__":
         main()

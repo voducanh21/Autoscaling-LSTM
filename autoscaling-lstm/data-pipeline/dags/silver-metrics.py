@@ -28,7 +28,7 @@ with DAG(
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
             "PAST_HOURS": "48",
-            "ROLL_WINDOWS": "[5,10,15]",
+            "ROLL_WINDOWS": "[5,15]",
             "LAG_MINUTES": "[1,5,10]",
             "AWS_S3_ADDRESSING_STYLE": "path",
         },

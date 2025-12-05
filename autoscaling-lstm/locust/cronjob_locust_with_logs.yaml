@@ -1,0 +1,247 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: locustfile-csv
+  namespace: loadtest
+data:
+  locustfile.py: |
+    import os, csv, threading, time, queue
+    from locust import FastHttpUser, task, between, events
+    import requests
+
+    # ===== Config =====
+    HOST = os.getenv("HOST", "http://api-gateway.apps.svc.cluster.local:8888")
+    PROM_URL = os.getenv("PROM_URL")
+    TIMEOUT = float(os.getenv("TIMEOUT", "30"))
+    CSV_FILE = os.getenv("CSV_FILE", "/mnt/traffic/traffic.csv")
+    USER_EMAIL = os.getenv("USER_EMAIL")
+    USER_PASSWORD = os.getenv("USER_PASSWORD")
+    VALID_PRODUCT_ID = int(os.getenv("VALID_PRODUCT_ID", "1"))
+
+    # ===== Load traffic CSV =====
+    traffic_data = []
+    try:
+        with open(CSV_FILE, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                traffic_data.append({
+                    "users": int(row["total_users"]),
+                    "product": int(row["product_requests"]),
+                    "order": int(row["order_requests"]),
+                    "payment": int(row["payment_requests"]),
+                })
+    except FileNotFoundError:
+        print(f"[ERROR] CSV file not found: {CSV_FILE}")
+        exit(1)
+
+    RUN_MINUTES = len(traffic_data)
+
+    # ===== Request Queue =====
+    request_queue = queue.Queue()
+    current_minute_idx = 0
+    minute_lock = threading.Lock()
+
+    def distribute_requests_per_second(total_requests):
+        slots = [0] * 60
+        if total_requests <= 0:
+            return slots
+        base = total_requests // 60
+        remainder = total_requests % 60
+        slots = [base] * 60
+        if remainder > 0:
+            interval = 60 / remainder
+            for i in range(remainder):
+                idx = int(i * interval)
+                slots[idx] += 1
+        return slots
+
+    def refill_queue_per_second():
+        global current_minute_idx
+        while current_minute_idx < len(traffic_data):
+            with minute_lock:
+                data = traffic_data[current_minute_idx]
+                prod_slots = distribute_requests_per_second(data["product"])
+                order_slots = distribute_requests_per_second(data["order"])
+                pay_slots  = distribute_requests_per_second(data["payment"])
+
+            for sec in range(60):
+                for _ in range(prod_slots[sec]):
+                    request_queue.put("product")
+                for _ in range(order_slots[sec]):
+                    request_queue.put("order")
+                for _ in range(pay_slots[sec]):
+                    request_queue.put("payment")
+                time.sleep(1)
+
+            current_minute_idx += 1
+
+    # ===== User class =====
+    class ApiGatewayUser(FastHttpUser):
+        host = HOST
+        wait_time = between(0.001, 0.001)
+        headers = {}
+
+        def on_start(self):
+            try:
+                r = self.client.post(
+                    "/api/auth/login",
+                    json={"email": USER_EMAIL, "password": USER_PASSWORD},
+                    timeout=TIMEOUT,
+                    name="login"
+                )
+                if r.status_code == 200:
+                    tok = r.json().get("token") or r.json().get("access_token")
+                    if tok:
+                        self.headers = {"Authorization": f"Bearer {tok}"}
+            except Exception as e:
+                print(f"[ERROR] Login failed: {e}")
+
+        @task
+        def run_requests(self):
+            try:
+                req_type = request_queue.get_nowait()
+            except queue.Empty:
+                time.sleep(0.1)
+                return
+
+            if req_type == "product":
+                self.client.get("/api/products", name="products", timeout=TIMEOUT)
+            elif req_type == "order":
+                if self.headers:
+                    self.client.post(
+                        "/api/order/place-order",
+                        json={"items":[{"productId": VALID_PRODUCT_ID,"quantity":1}]},
+                        headers=self.headers,
+                        name="order",
+                        timeout=TIMEOUT
+                    )
+            elif req_type == "payment":
+                self.client.get("/api/payment/modes", name="payment_modes", timeout=TIMEOUT)
+
+    # ===== Monitoring =====
+    def q(query: str) -> float:
+        try:
+            r = requests.get(
+                f"{PROM_URL}/api/v1/query",
+                params={"query": query},
+                timeout=5
+            )
+            data = r.json()
+            if data["status"] == "success" and data["data"]["result"]:
+                return float(data["data"]["result"][0]["value"][1])
+        except:
+            pass
+        return 0.0
+
+    def monitor():
+        start = time.time()
+        while True:
+            time.sleep(30)
+            elapsed = time.time() - start
+            rps = q('svc:qps:rate1m{job="api-gateway"}')
+            cpu = q('pod:cpu:usage1m{namespace="apps",pod=~"api-gateway-.*"}') * 1000
+            mem = q('pod:mem:usage{namespace="apps",pod=~"api-gateway-.*"}') / (1024 * 1024)
+            print(f"[MONITOR] {elapsed:.0f}s | RPS={rps:.1f} | CPU={cpu:.0f}m | MEM={mem:.1f}MiB")
+
+    def auto_stop():
+        time.sleep(RUN_MINUTES * 60)
+        print(f"[STOP] {RUN_MINUTES} minutes passed — stopping job.")
+        os._exit(0)
+
+    # ===== Events =====
+    @events.test_start.add_listener
+    def on_test_start(environment, **_):
+        threading.Thread(target=refill_queue_per_second, daemon=True).start()
+        threading.Thread(target=monitor, daemon=True).start()
+        threading.Thread(target=auto_stop, daemon=True).start()
+
+        def spawn_users_later():
+            while not environment.runner:
+                time.sleep(0.1)
+
+            initial_users = traffic_data[0]["users"]
+            environment.runner.start(
+                user_count=initial_users,
+                spawn_rate=max(initial_users/10, 1)
+            )
+
+            def scheduler():
+                prev_users = initial_users
+                for data in traffic_data[1:]:
+                    time.sleep(60)
+                    if not environment.runner:
+                        continue
+
+                    target = data["users"]
+                    delta = target - prev_users
+
+                    if delta > 0:
+                        environment.runner.spawn_users(
+                            {ApiGatewayUser.__name__: delta},
+                            wait=False
+                        )
+                    elif delta < 0:
+                        curr = environment.runner.user_classes_count.get(ApiGatewayUser.__name__, 0)
+                        stop_count = min(curr, -delta)
+                        if stop_count > 0:
+                            environment.runner.stop_users(
+                                {ApiGatewayUser.__name__: stop_count}
+                            )
+
+                    prev_users = target
+
+            threading.Thread(target=scheduler, daemon=True).start()
+
+        threading.Thread(target=spawn_users_later, daemon=True).start()
+
+    @events.test_stop.add_listener
+    def on_test_stop(environment, **_):
+        print("[CLEANUP] Test stopped.")
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: locust-csv
+  namespace: loadtest
+spec:
+  schedule: "0 0 * * *"  # chạy 1 lần mỗi ngày (suspend bật/tắt tùy bạn)
+  timeZone: "Asia/Ho_Chi_Minh"
+  suspend: true          # bật khi cần chạy thật
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: locust
+              image: locustio/locust:2.31.3
+              command: ["locust"]
+              args:
+                ["-f","/mnt/locust/locustfile.py","--headless"]
+              env:
+                - name: USER_EMAIL
+                  value: "test1@example.com"
+                - name: USER_PASSWORD
+                  value: "password123"
+                - name: VALID_PRODUCT_ID
+                  value: "1"
+                - name: TIMEOUT
+                  value: "30"
+                - name: HOST
+                  value: "http://api-gateway.apps.svc.cluster.local:8888"
+                - name: CSV_FILE
+                  value: "/mnt/traffic/traffic.csv"
+                - name: PROM_URL
+                  value: "http://kube-prometheus-kube-prome-prometheus.monitoring:9090"
+              volumeMounts:
+                - name: locustfile
+                  mountPath: /mnt/locust
+                - name: trafficfile
+                  mountPath: /mnt/traffic
+          volumes:
+            - name: locustfile
+              configMap:
+                name: locustfile-csv
+            - name: trafficfile
+              persistentVolumeClaim:
+                claimName: traffic-pvc

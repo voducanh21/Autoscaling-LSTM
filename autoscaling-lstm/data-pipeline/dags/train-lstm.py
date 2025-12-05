@@ -7,7 +7,7 @@ with DAG(
         dag_id="train_lstm_dag",
         description="Train and register LSTM model to MLflow (2 stages)",
         start_date=datetime(2025, 10, 27),
-        schedule=None,      # chạy mỗi 6 tiếng
+        schedule="0 */6 * * *",      # chạy mỗi 6 tiếng
         catchup=False,
         max_active_runs=1,
         tags=["train", "lstm", "mlflow"],

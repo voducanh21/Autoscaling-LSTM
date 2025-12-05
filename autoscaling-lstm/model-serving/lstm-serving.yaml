@@ -14,64 +14,58 @@ data:
 
     app = FastAPI(title="LSTM Forecast Serving API")
 
-    # === ENV ===
-    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
-    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL")
-    MODEL_URI = os.getenv("MODEL_URI")
+    # === ENVIRONMENT CONFIG ===
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
+    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "https://minio.voducanh.id.vn")
+    MODEL_URI = os.getenv("MODEL_URI")  # ex: models:/lstm_forecast/Production
     MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
+    # S3 config
     os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
     os.environ["AWS_S3_ADDRESSING_STYLE"] = "path"
 
+    # === LOAD MODEL ===
     if not MODEL_URI:
         MODEL_URI = f"models:/{MODEL_NAME}/Production"
 
-    print(f"[SERVING] Loading model from URI={MODEL_URI}")
+    print(f"[SERVING] Loading model from MLflow URI: {MODEL_URI}")
 
     try:
         model = mlflow.pyfunc.load_model(MODEL_URI)
-        print("[SERVING] Model loaded OK")
+        print(f"[SERVING] ✅ Model loaded successfully from {MODEL_URI}")
     except Exception as e:
-        raise RuntimeError(f"Cannot load model: {e}")
+        raise RuntimeError(f"Cannot load model from MLflow/MinIO: {e}")
 
     @app.get("/")
     def root():
-        return {"message": f"LSTM Serving Running (model={MODEL_URI})"}
+        return {"message": f"LSTM model loaded successfully from URI: {MODEL_URI}"}
 
     @app.post("/predict")
     def predict(data: dict):
         try:
-            ts = data.get("timeseries")
-            # model expects 'service_id', fallback to service_ids
-            svc = data.get("service_id") or data.get("service_ids")
+            inputs = data.get("inputs") or data.get("features")
+            if inputs is None:
+                raise ValueError("Missing 'inputs' or 'features' in request body")
 
-            if ts is None or svc is None:
-                raise ValueError("Missing 'timeseries' or 'service_id'")
+            # Expect (1,30,5)
+            arr = np.array(inputs, dtype=np.float32)
+            if arr.ndim != 3 or arr.shape[2] != 5:
+                raise ValueError(f"Expected shape (1, 30, 5), got {arr.shape}")
 
-            ts_arr = np.array(ts, dtype=np.float32)   # (1,30,23)
-            svc_arr = np.array(svc, dtype=np.int32)   # (1,30)
-
-            # shape validations
-            if ts_arr.ndim != 3 or ts_arr.shape[2] != 23:
-                raise ValueError(f"timeseries shape must be (1,30,23), got {ts_arr.shape}")
-
-            if svc_arr.shape != (ts_arr.shape[0], ts_arr.shape[1]):
-                raise ValueError(f"service_id shape must be (1,30), got {svc_arr.shape}")
-
-            preds = model.predict({
-                "timeseries": ts_arr,
-                "service_id": svc_arr
-            })
-
+            preds = model.predict(arr)
             preds = np.array(preds).flatten().tolist()
 
-            return {
-                "rps_future": preds[0],
-                "cpu_future": preds[1],
-                "mem_future": preds[2],
-                "predictions": preds
-            }
+            # 3 outputs: rps_future, cpu_future, mem_future
+            if len(preds) >= 3:
+                return {
+                    "rps_future": preds[0],
+                    "cpu_future": preds[1],
+                    "mem_future": preds[2],
+                    "predictions": preds,
+                }
+            return {"predictions": preds}
 
         except Exception as e:
             traceback.print_exc()
