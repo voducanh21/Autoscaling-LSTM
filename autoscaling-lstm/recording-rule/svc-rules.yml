@@ -36,6 +36,11 @@ spec:
         - record: "svc:latency_p95_ms_1m"
           expr: 1000 * svc:latency_p95_s_1m
 
+        # ===== SLA violation flag: 1 nếu p95 > 300ms =====
+        - record: "svc:sla_violation_1m"
+          expr: |
+            (svc:latency_p95_ms_1m > 300)
+
         # ===== CPU theo POD (cores), 1 phút =====
         - record: "pod:cpu:usage1m"
           expr: |
