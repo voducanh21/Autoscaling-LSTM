@@ -2,19 +2,31 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: register-model-script
-  namespace: airflow
+  namespace: cronjob
 data:
   register_model.py: |
     import os
+    import sys
     import mlflow
     from mlflow.tracking import MlflowClient
-    import subprocess
 
     # ============================
     # CONFIG
     # ============================
-    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
-    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
+    MLFLOW_TRACKING_URI = os.getenv(
+        "MLFLOW_TRACKING_URI",
+        "http://mlflow.mlflow.svc.cluster.local:5000"
+    )
+
+    # Prefer explicit, fallback MODEL_NAME, fallback default
+    MODEL_NAME = os.getenv("REGISTERED_MODEL_NAME") or os.getenv("MODEL_NAME") or "lstm_forecast"
+
+    # Promotion rules
+    REQUIRE_BOTH_RPS_AND_CPU = os.getenv("REQUIRE_BOTH_RPS_AND_CPU", "true").lower() == "true"
+    EPS = float(os.getenv("PROMOTION_EPS", "0.0"))  # allow tiny tolerance
+
+    # Optional: require NEW beats its own baseline on TEST (if metric exists)
+    REQUIRE_BEAT_BASELINE_TEST_WAPE = os.getenv("REQUIRE_BEAT_BASELINE_TEST_WAPE", "false").lower() == "true"
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     client = MlflowClient()
@@ -23,87 +35,187 @@ data:
     print(f"[INFO] Model Name: {MODEL_NAME}")
 
     # ============================
-    # REQUIRED METRICS
+    # METRIC KEYS (Updated for new train script 80/10/10)
+    # - Prefer TEST metrics for promotion (offline test)
+    # - Fallback to VAL if TEST missing
     # ============================
-    MAPE_KEYS = [
-        "val_mape_rps",
-        "val_mape_cpu",
-        "val_mape_mem",
-    ]
+    KEY_CANDIDATES = {
+        # hard checks (lower is better)
+        "mae_rps":  ["test_mae_rps", "val_mae_rps"],
+        "mae_cpu":  ["test_mae_cpu", "val_mae_cpu", "final_val_mae_cpu"],  # extra fallbacks if older runs
+        "mae_mem":  ["test_mae_mem", "val_mae_mem", "final_val_mae_mem"],
+
+        # info/tie
+        "wape_rps": ["test_wape_rps", "val_wape_rps"],
+        "baseline_test_wape_rps": ["baseline_test_wape_rps"],
+        "improve_test_wape_rps":  ["improve_test_wape_rps"],
+
+        # cost
+        "fit_s":    ["final_fit_s", "fit_s"],
+        "epochs":   ["final_epochs_trained", "epochs_trained"],
+
+        # optional per-service (if logged by train script)
+        "test_mae_rps_api_gateway":        ["test_mae_rps_api_gateway"],
+        "test_mae_rps_authentication_service": ["test_mae_rps_authentication_service"],
+        "test_mae_rps_order_service":      ["test_mae_rps_order_service"],
+        "test_mae_rps_payment_service":    ["test_mae_rps_payment_service"],
+        "test_mae_rps_product_service":    ["test_mae_rps_product_service"],
+    }
+
+    def pick_metric(metrics: dict, candidates: list):
+        for k in candidates:
+            if k in metrics:
+                try:
+                    return k, float(metrics[k])
+                except Exception:
+                    return k, None
+        return None, None
+
+    def need(metrics: dict, key_alias: str):
+        return pick_metric(metrics, KEY_CANDIDATES[key_alias])
+
+    def better_lower(new_v, old_v):
+        return (new_v + EPS) < old_v
 
     # ============================
-    # GET NEW MODEL (NO STAGE)
+    # GET LATEST REGISTERED MODEL VERSION (NEWEST)
     # ============================
-    latest = client.get_latest_versions(MODEL_NAME, stages=["None"])
-    if not latest:
-        print("❌ No new model found → exit.")
-        exit(0)
+    versions = client.search_model_versions(f"name='{MODEL_NAME}'")
+    if not versions:
+        print("❌ No registered model versions found → exit.")
+        sys.exit(0)
 
-    new_model = latest[0]
+    versions = sorted(versions, key=lambda v: int(v.version), reverse=True)
+
+    new_model = versions[0]
+    new_ver = str(new_model.version)
     new_run_id = new_model.run_id
-    new_ver = new_model.version
 
     print(f"[NEW] Version={new_ver}, run_id={new_run_id}")
-
-    new_metrics = client.get_run(new_run_id).data.metrics
-    print(f"[NEW] Metrics: {new_metrics}")
-
-    # Check new metrics
-    for k in MAPE_KEYS:
-        if k not in new_metrics:
-            print(f"⚠️ Missing required metric: {k} → skip.")
-            exit(0)
+    new_run = client.get_run(new_run_id)
+    new_metrics = new_run.data.metrics or {}
+    print(f"[NEW] Metrics keys={sorted(list(new_metrics.keys()))}")
 
     # ============================
-    # GET PRODUCTION MODEL
+    # GET CURRENT PRODUCTION MODEL (if any)
     # ============================
-    prod_versions = client.get_latest_versions(MODEL_NAME, stages=["Production"])
+    prod_versions = [v for v in versions if getattr(v, "current_stage", "") == "Production"]
     if prod_versions:
         prod_model = prod_versions[0]
+        prod_ver = str(prod_model.version)
         prod_run_id = prod_model.run_id
-        prod_metrics = client.get_run(prod_run_id).data.metrics
-        print(f"[PROD] Version={prod_model.version} Metrics={prod_metrics}")
+        prod_run = client.get_run(prod_run_id)
+        prod_metrics = prod_run.data.metrics or {}
+        print(f"[PROD] Version={prod_ver}, run_id={prod_run_id}")
+        print(f"[PROD] Metrics keys={sorted(list(prod_metrics.keys()))}")
     else:
         prod_model = None
         prod_metrics = {}
-        print("[INFO] No Production model found → promote new one.")
+        print("[INFO] No Production model found → will promote NEW after metric check.")
 
     # ============================
-    # DECISION LOGIC
+    # REQUIRED METRICS (hard)
+    # Prefer TEST (test_mae_rps/test_mae_cpu). Fallback to VAL if needed.
+    # ============================
+    new_mae_rps_k, new_mae_rps = need(new_metrics, "mae_rps")
+    new_mae_cpu_k, new_mae_cpu = need(new_metrics, "mae_cpu")
+
+    missing_required = []
+    if new_mae_rps is None:
+        missing_required.append("MAE_RPS (test_mae_rps or val_mae_rps)")
+    if new_mae_cpu is None:
+        missing_required.append("MAE_CPU (test_mae_cpu or val_mae_cpu)")
+
+    if missing_required:
+        print(f"⚠️ Missing required metric(s) in NEW: {missing_required} → skip promotion.")
+        sys.exit(0)
+
+    # Optional info metrics
+    new_wape_k, new_wape = need(new_metrics, "wape_rps")
+    new_fit_k, new_fit = need(new_metrics, "fit_s")
+    new_ep_k, new_ep = need(new_metrics, "epochs")
+
+    base_k, base_wape = need(new_metrics, "baseline_test_wape_rps")
+    imp_k, imp_wape = need(new_metrics, "improve_test_wape_rps")
+
+    if REQUIRE_BEAT_BASELINE_TEST_WAPE:
+        if imp_wape is None:
+            print("⚠️ REQUIRE_BEAT_BASELINE_TEST_WAPE=true but improve_test_wape_rps missing → skip promotion.")
+            sys.exit(0)
+        if imp_wape <= 0.0 + EPS:
+            print(f"❌ NEW does not beat baseline on TEST WAPE: {imp_k}={imp_wape:.6f} → skip promotion.")
+            sys.exit(0)
+        print(f"✔ NEW beats baseline on TEST WAPE: {imp_k}={imp_wape:.6f}")
+
+    # ============================
+    # DECISION
     # ============================
     promote = False
 
     if prod_model is None:
-        print("🆕 First model → promote.")
         promote = True
+        print("[DECISION] No Production → promote NEW.")
     else:
-        better = True
-        print("=== COMPARISON (3 METRICS) ===")
+        old_mae_rps_k, old_mae_rps = need(prod_metrics, "mae_rps")
+        old_mae_cpu_k, old_mae_cpu = need(prod_metrics, "mae_cpu")
 
-        for k in MAPE_KEYS:
-            new_val = new_metrics.get(k)
-            old_val = prod_metrics.get(k)
+        print("=== COMPARISON (LOWER is better) ===")
+        if old_mae_rps is not None:
+            print(f"RPS_MAE: NEW {new_mae_rps_k}={new_mae_rps:.6f} | PROD {old_mae_rps_k}={old_mae_rps:.6f}")
+        else:
+            print(f"RPS_MAE: NEW {new_mae_rps_k}={new_mae_rps:.6f} | PROD missing")
 
-            if old_val is None:
-                print(f"[WARN] Prod missing {k} → auto promote.")
-                continue
+        if old_mae_cpu is not None:
+            print(f"CPU_MAE: NEW {new_mae_cpu_k}={new_mae_cpu:.6f} | PROD {old_mae_cpu_k}={old_mae_cpu:.6f}")
+        else:
+            print(f"CPU_MAE: NEW {new_mae_cpu_k}={new_mae_cpu:.6f} | PROD missing")
 
-            if new_val < old_val:
-                print(f"✔ {k}: improved {new_val:.4f} < {old_val:.4f}")
+        better_rps = True
+        better_cpu = True
+
+        if old_mae_rps is not None:
+            better_rps = better_lower(new_mae_rps, old_mae_rps)
+            print("✔ RPS_MAE improved" if better_rps else "✖ RPS_MAE not improved")
+        else:
+            print("[WARN] PROD missing RPS_MAE → ignore RPS in hard check.")
+
+        if old_mae_cpu is not None:
+            better_cpu = better_lower(new_mae_cpu, old_mae_cpu)
+            print("✔ CPU_MAE improved" if better_cpu else "✖ CPU_MAE not improved")
+        else:
+            print("[WARN] PROD missing CPU_MAE → ignore CPU in hard check.")
+
+        promote = (better_rps and better_cpu) if REQUIRE_BOTH_RPS_AND_CPU else (better_rps or better_cpu)
+
+        # info only
+        if new_wape is not None:
+            old_wape_k, old_wape = need(prod_metrics, "wape_rps")
+            if old_wape is not None:
+                tag = "✔" if better_lower(new_wape, old_wape) else "✖"
+                print(f"(info) WAPE_RPS: NEW {new_wape_k}={new_wape:.6f} {tag} PROD {old_wape_k}={old_wape:.6f}")
             else:
-                print(f"✖ {k}: worse {new_val:.4f} >= {old_val:.4f}")
-                better = False
+                print(f"(info) WAPE_RPS: NEW {new_wape_k}={new_wape:.6f} | PROD missing")
 
-        promote = better
+        if new_fit is not None:
+            old_fit_k, old_fit = need(prod_metrics, "fit_s")
+            if old_fit is not None:
+                print(f"(info) fit_s: NEW {new_fit_k}={new_fit:.3f} | PROD {old_fit_k}={old_fit:.3f}")
+            else:
+                print(f"(info) fit_s: NEW {new_fit_k}={new_fit:.3f} | PROD missing")
+
+        if new_ep is not None:
+            old_ep_k, old_ep = need(prod_metrics, "epochs")
+            if old_ep is not None:
+                print(f"(info) epochs: NEW {new_ep_k}={new_ep:.0f} | PROD {old_ep_k}={old_ep:.0f}")
 
     # ============================
     # APPLY DECISION
     # ============================
     if not promote:
         print("❌ Model NOT promoted.")
-        exit(0)
+        sys.exit(0)
 
-    print(f"🚀 PROMOTING version {new_ver} → Production")
+    print(f"🚀 PROMOTING {MODEL_NAME} version {new_ver} → Production")
 
     client.transition_model_version_stage(
         name=MODEL_NAME,
@@ -112,24 +224,19 @@ data:
         archive_existing_versions=True
     )
 
-    # ============================
-    # PATCH CONFIGMAP
-    # ============================
-    model_uri = f"models:/{MODEL_NAME}/Production"
-    subprocess.run([
-        "kubectl", "patch", "configmap", "lstm-config",
-        "-n", "model",
-        "-p", f'{{"data":{{"MODEL_URI":"{model_uri}"}}}}'
-    ], check=False)
+    # Print some useful per-service info if present
+    for alias in [
+        "test_mae_rps_api_gateway",
+        "test_mae_rps_authentication_service",
+        "test_mae_rps_order_service",
+        "test_mae_rps_payment_service",
+        "test_mae_rps_product_service",
+    ]:
+        k, v = need(new_metrics, alias)
+        if v is not None:
+            print(f"[NEW][per-service] {k}={v:.6f}")
 
-    print(f"🔁 Updated lstm-config MODEL_URI={model_uri}")
-
-    # ============================
-    # RESTART DEPLOYMENT
-    # ============================
-    subprocess.run([
-        "kubectl", "rollout", "restart", "deployment/lstm-serving",
-        "-n", "model"
-    ], check=False)
-
-    print("♻️ Restarted lstm-serving to load new model")
+    print("✅ Promotion completed.")
+    print("ℹ️ Serving layer should load:")
+    print(f"    models:/{MODEL_NAME}/Production")
+    print("[DONE] register_model.py finished successfully.")

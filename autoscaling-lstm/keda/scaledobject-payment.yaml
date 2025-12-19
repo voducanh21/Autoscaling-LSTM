@@ -1,19 +1,24 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: payment-service-lstm-scaler
+  name: payment-lstm
   namespace: apps
 spec:
   scaleTargetRef:
     name: payment-service
   minReplicaCount: 1
-  maxReplicaCount: 12
+  maxReplicaCount: 6
   pollingInterval: 30
-  cooldownPeriod: 300
-
+  cooldownPeriod: 60
+  advanced:
+    restoreToOriginalReplicaCount: false
   triggers:
-    - type: external
+    - type: prometheus
       metadata:
-        scalerAddress: predictor-exporter-payment-service.model.svc.cluster.local:9101
-        metricName: lstm_pred_rps_payment_service
-        targetValue: "200"
+        serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+        metricName: lstm_desired_replicas
+        query: lstm_desired_replicas{service="predictor-exporter-payment"}
+        threshold: "1"
+  fallback:
+    failureThreshold: 3
+    replicas: 2

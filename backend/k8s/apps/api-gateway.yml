@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,7 +15,6 @@ spec:
       labels:
         app: api-gateway
     spec:
-      # --- ADDED: ép pod chạy trên worker “apps/infra/monitoring”
       nodeSelector:
         kubernetes.io/hostname: k3n-m02
       containers:
@@ -24,13 +22,10 @@ spec:
           image: ducanhvo/new-api-gateway:latest
           ports:
             - name: http
-              containerPort: 8888       # port chính dùng cho traffic ứng dụng
-            - name: metrics
-              containerPort: 8888       # cùng containerPort, để ServiceMonitor trỏ vào
-          # --- ADDED: baseline requests/limits để scheduler đỡ nghẽn (điều chỉnh theo thực tế)
+              containerPort: 8888
           resources:
             requests:
-              cpu: "250m"
+              cpu: "500m"
               memory: "256Mi"
             limits:
               cpu: "1000m"
@@ -71,9 +66,9 @@ spec:
     - name: http
       protocol: TCP
       port: 8888
-      targetPort: http
+      targetPort: 8888
     - name: metrics
       protocol: TCP
-      port: 9090                  # port ClusterIP mới dành cho Prometheus
-      targetPort: metrics         # map về containerPort 8888
+      port: 9090
+      targetPort: 8888
   type: ClusterIP

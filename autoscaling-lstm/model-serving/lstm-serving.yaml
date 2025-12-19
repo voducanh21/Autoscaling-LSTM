@@ -7,65 +7,68 @@ data:
   main.py: |
     import os
     import mlflow
-    import mlflow.pyfunc
+    import mlflow.keras
     from fastapi import FastAPI, HTTPException
     import numpy as np
     import traceback
 
     app = FastAPI(title="LSTM Forecast Serving API")
 
-    # === ENVIRONMENT CONFIG ===
-    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow.mlflow.svc.cluster.local:5000")
-    MLFLOW_S3_ENDPOINT_URL = os.getenv("MLFLOW_S3_ENDPOINT_URL", "https://minio.voducanh.id.vn")
-    MODEL_URI = os.getenv("MODEL_URI")  # ex: models:/lstm_forecast/Production
-    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
+    # ================= ENV =================
+    MLFLOW_TRACKING_URI = os.getenv(
+        "MLFLOW_TRACKING_URI",
+        "http://mlflow.mlflow.svc.cluster.local:5000"
+    )
+    MODEL_URI = os.getenv("MODEL_URI", "models:/lstm_forecast/Production")
+
+    # MUST match training
+    FEATURE_COUNT = int(os.getenv("FEATURE_COUNT", "13"))
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-    # S3 config
-    os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
-    os.environ["AWS_S3_ADDRESSING_STYLE"] = "path"
-
-    # === LOAD MODEL ===
-    if not MODEL_URI:
-        MODEL_URI = f"models:/{MODEL_NAME}/Production"
-
-    print(f"[SERVING] Loading model from MLflow URI: {MODEL_URI}")
-
+    # ================= LOAD MODEL =================
     try:
-        model = mlflow.pyfunc.load_model(MODEL_URI)
-        print(f"[SERVING] ✅ Model loaded successfully from {MODEL_URI}")
+        model = mlflow.keras.load_model(MODEL_URI)
+        print(f"[SERVING] Loaded model from {MODEL_URI}")
     except Exception as e:
-        raise RuntimeError(f"Cannot load model from MLflow/MinIO: {e}")
+        raise RuntimeError(f"Cannot load model: {e}")
 
     @app.get("/")
     def root():
-        return {"message": f"LSTM model loaded successfully from URI: {MODEL_URI}"}
+        return {"status": "ok", "model_uri": MODEL_URI}
 
     @app.post("/predict")
-    def predict(data: dict):
+    def predict(payload: dict):
+        """
+        Expected payload:
+        {
+          "timeseries": [[[...13 features...], ...]],   # (B, T, 13)
+          "service_id": [[0,0,0,...]]                   # (B, T)
+        }
+        """
         try:
-            inputs = data.get("inputs") or data.get("features")
-            if inputs is None:
-                raise ValueError("Missing 'inputs' or 'features' in request body")
+            X = np.asarray(payload.get("timeseries"), dtype=np.float32)
+            S = np.asarray(payload.get("service_id"), dtype=np.int32)
 
-            # Expect (1,30,5)
-            arr = np.array(inputs, dtype=np.float32)
-            if arr.ndim != 3 or arr.shape[2] != 5:
-                raise ValueError(f"Expected shape (1, 30, 5), got {arr.shape}")
+            if X.ndim != 3 or X.shape[2] != FEATURE_COUNT:
+                raise ValueError(
+                    f"timeseries must be (B, T, {FEATURE_COUNT}), got {X.shape}"
+                )
 
-            preds = model.predict(arr)
-            preds = np.array(preds).flatten().tolist()
+            if S.ndim != 2 or S.shape[0] != X.shape[0] or S.shape[1] != X.shape[1]:
+                raise ValueError(
+                    f"service_id must be (B, T) and match timeseries, got {S.shape}"
+                )
 
-            # 3 outputs: rps_future, cpu_future, mem_future
-            if len(preds) >= 3:
-                return {
-                    "rps_future": preds[0],
-                    "cpu_future": preds[1],
-                    "mem_future": preds[2],
-                    "predictions": preds,
-                }
-            return {"predictions": preds}
+            preds = model.predict([X, S], verbose=0)
+            preds = preds.reshape(-1).tolist()
+
+            return {
+                "rps_future": preds[0],
+                "cpu_future": preds[1],
+                "mem_future": preds[2],
+                "predictions": preds
+            }
 
         except Exception as e:
             traceback.print_exc()

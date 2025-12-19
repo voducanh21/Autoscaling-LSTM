@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,19 +19,16 @@ spec:
         kubernetes.io/hostname: k3n-m02
       containers:
         - name: payment-service
-          image: ducanhvo/new-payment-service:latest  # thay đổi nếu dùng tag khác
+          image: ducanhvo/new-payment-service:latest
           ports:
-            - name: http                 # ← giữ port HTTP
+            - name: http
               containerPort: 8082
-            - name: metrics              # ← thêm port “metrics” để Prometheus scrape
-              containerPort: 8082
-          # --- ADDED: baseline requests/limits để scheduler ổn định hơn
           resources:
             requests:
               cpu: "250m"
               memory: "256Mi"
             limits:
-              cpu: "1000m"
+              cpu: "500m"
               memory: "1Gi"
           env:
             - name: SPRING_DATASOURCE_URL
@@ -53,12 +49,12 @@ spec:
   selector:
     app: payment-service
   ports:
-    - name: http                     # ← port cho traffic ứng dụng
+    - name: http
       protocol: TCP
       port: 8082
-      targetPort: http
-    - name: metrics                  # ← thêm port ClusterIP “metrics” cho Prometheus
+      targetPort: 8082
+    - name: metrics
       protocol: TCP
-      port: 9090                     # ← port mới mà Prometheus sẽ gọi
-      targetPort: metrics            # ← map về containerPort=8082 (port “metrics”)
+      port: 9090
+      targetPort: 8082
   type: ClusterIP

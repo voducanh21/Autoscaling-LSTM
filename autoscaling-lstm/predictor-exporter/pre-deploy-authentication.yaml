@@ -28,6 +28,8 @@ spec:
             - -c
             - |
               set -e
+              export PYTHONUNBUFFERED=1
+              export PIP_DISABLE_PIP_VERSION_CHECK=1
               pip install --no-cache-dir prometheus_client requests
               echo "[EXPORTER] Dependencies installed, starting exporter..."
               exec python /app/predictor_exporter.py
@@ -38,15 +40,36 @@ spec:
               value: "http://lstm-serving.model.svc.cluster.local:8080/predict"
             - name: EXPORT_PORT
               value: "9101"
+
+            # Align timestep with training (silver asfreq=1min)
             - name: INTERVAL_SECONDS
+              value: "60"
+
+            # Optional timeouts (recommended)
+            - name: PROM_TIMEOUT_SECONDS
               value: "5"
+            - name: MODEL_TIMEOUT_SECONDS
+              value: "10"
+
             - name: TARGET_RPS_PER_POD
-              value: "250"
+              value: "200"
             - name: APP_JOB
               value: "authentication-service"
+            - name: SERVICE_NAME
+              value: "authentication-service"
+            - name: WINDOW_SIZE
+              value: "10"
+            - name: TIMEZONE
+              value: "Asia/Ho_Chi_Minh"
+
+            # optional but keep consistent with training/silver
+            - name: APPS_NAMESPACE
+              value: "apps"
+            - name: MEM_LIMIT_BYTES
+              value: "1073741824"
           ports:
-            - name: http-metrics
-              containerPort: 9101
+            - containerPort: 9101
+              name: http-metrics
           resources:
             requests:
               cpu: "100m"
@@ -71,16 +94,16 @@ metadata:
   labels:
     app: predictor-exporter
     service: authentication-service
-    release: kube-prometheus      # <-- PHẢI CÓ
+    release: kube-prometheus
 spec:
   type: ClusterIP
-  selector:
-    app: predictor-exporter
-    service: authentication-service
   ports:
     - name: http-metrics
       port: 9101
       targetPort: 9101
+  selector:
+    app: predictor-exporter
+    service: authentication-service
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -88,9 +111,10 @@ metadata:
   name: predictor-exporter-authentication
   namespace: model
   labels:
-    release: kube-prometheus       # match Prometheus selector
+    release: kube-prometheus
 spec:
-  jobLabel: app
+  # job label = service (authentication-service) để tách series theo service
+  jobLabel: service
   namespaceSelector:
     matchNames:
       - model
@@ -101,5 +125,14 @@ spec:
   endpoints:
     - port: http-metrics
       path: /metrics
-      interval: 30s
-      scrapeTimeout: 10s
+      interval: 60s
+      scrapeTimeout: 5s
+
+      # chỉ lưu 4 metric lstm_*
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'lstm_(pred_rps|pred_cpu|pred_mem|desired_replicas)'
+          action: keep
+
+      # chặn trường hợp exporter lỡ export nhiều metric
+      sampleLimit: 20

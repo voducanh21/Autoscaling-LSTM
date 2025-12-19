@@ -4,8 +4,8 @@ metadata:
   name: train-lstm-cronjob
   namespace: cronjob
 spec:
-  schedule: "0 */6 * * *"         # chạy mỗi 6 tiếng
-  suspend: true                   # disable mặc định
+  schedule: "0 */6 * * *"
+  suspend: true
   jobTemplate:
     spec:
       template:
@@ -13,13 +13,21 @@ spec:
           restartPolicy: Never
           nodeSelector:
             kubernetes.io/hostname: k3n-m03
+          serviceAccountName: register-model-sa
 
           containers:
             - name: train-lstm
               image: ducanhvo/train-lstm:latest
               imagePullPolicy: Always
-              command: ["python"]
-              args: ["/app/train_lstm.py"]
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[INFO] Start training LSTM..."
+                  python /app/train_lstm.py
+                  echo "[INFO] Training done. Running model registry..."
+                  python /register/register_model.py
+                  echo "[INFO] Registry done."
 
               env:
                 # --- S3 / MinIO ---
@@ -43,14 +51,28 @@ spec:
                   value: "http://mlflow.mlflow.svc.cluster.local:5000"
 
                 # --- Training Params ---
-                - name: TARGET
-                  value: "rps_1m"
                 - name: WINDOW_SIZE
-                  value: "30"
+                  value: "10"
                 - name: EPOCHS
                   value: "20"
                 - name: BATCH_SIZE
                   value: "128"
+
+                # --- Split 80/10/10 ---
+                - name: TRAIN_FRAC
+                  value: "0.80"
+                - name: VAL_FRAC
+                  value: "0.10"
+                - name: EXTRA_EMBARGO_MINUTES
+                  value: "0"
+
+                # --- FULL DATA MODE ---
+                - name: DATE_FRACTION
+                  value: "1.0"
+                - name: DATE_PICK_MODE
+                  value: "all"
+                - name: DATE_SEED
+                  value: "42"
 
                 # --- MINIO credentials ---
                 - name: AWS_ACCESS_KEY_ID
@@ -64,12 +86,32 @@ spec:
                       name: minio-cred
                       key: AWS_SECRET_ACCESS_KEY
 
+                # --- Model / Experiment ---
+                - name: MODEL_NAME
+                  value: "lstm_forecast"
+                - name: EXPERIMENT_NAME
+                  value: "lstm_forecast"
+
+                # --- Promotion knobs (optional) ---
+                - name: REQUIRE_BOTH_RPS_AND_CPU
+                  value: "true"
+                - name: PROMOTION_EPS
+                  value: "0.0"
+                - name: REQUIRE_BEAT_BASELINE_TEST_WAPE
+                  value: "false"
+
               volumeMounts:
                 - name: train-lstm-script
                   mountPath: /app
+                  readOnly: true
+                - name: register-model-script
+                  mountPath: /register
                   readOnly: true
 
           volumes:
             - name: train-lstm-script
               configMap:
                 name: train-lstm-script
+            - name: register-model-script
+              configMap:
+                name: register-model-script

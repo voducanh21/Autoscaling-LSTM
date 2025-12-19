@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,17 +21,14 @@ spec:
         - name: authentication-service
           image: ducanhvo/new-authentication-service:latest
           ports:
-            - name: http                 # ← giữ nguyên port HTTP
+            - name: http
               containerPort: 8084
-            - name: metrics              # ← Thêm port “metrics” để Prometheus scrape
-              containerPort: 8084
-          # --- ADDED: baseline requests/limits để scheduler ổn định (tùy chỉnh theo thực tế)
           resources:
             requests:
               cpu: "250m"
               memory: "256Mi"
             limits:
-              cpu: "1000m"
+              cpu: "500m"
               memory: "1Gi"
           env:
             - name: SPRING_DATASOURCE_URL
@@ -57,12 +53,12 @@ spec:
   selector:
     app: authentication-service
   ports:
-    - name: http                     # ← port cho traffic ứng dụng
+    - name: http
       protocol: TCP
       port: 8084
-      targetPort: http
-    - name: metrics                  # ← Thêm port ClusterIP “metrics” cho Prometheus
+      targetPort: 8084
+    - name: metrics
       protocol: TCP
-      port: 9090                     # ← port mới mà Prometheus sẽ gọi
-      targetPort: metrics            # ← map về containerPort=8084 (port “metrics”)
+      port: 9090
+      targetPort: 8084
   type: ClusterIP

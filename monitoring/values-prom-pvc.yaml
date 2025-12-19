@@ -1,0 +1,53 @@
+prometheus:
+  prometheusSpec:
+    # ======================
+    # TÀI NGUYÊN PROMETHEUS
+    # ======================
+    resources:
+      requests:
+        cpu: 750m
+        memory: 3Gi
+      limits:
+        cpu: "2"
+        memory: 6Gi
+
+    # ======================
+    # NỚI PROBE (RẤT QUAN TRỌNG)
+    # ======================
+    livenessProbe:
+      timeoutSeconds: 10
+      periodSeconds: 10
+      failureThreshold: 6
+
+    readinessProbe:
+      timeoutSeconds: 10
+      periodSeconds: 10
+      failureThreshold: 3
+
+    startupProbe:
+      timeoutSeconds: 10
+      periodSeconds: 15
+      failureThreshold: 120
+
+    # ======================
+    # (OPTIONAL) GIẢM ÁP LỰC WAL
+    # ======================
+    walCompression: true
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 600m
+      memory: 512Mi
+
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi

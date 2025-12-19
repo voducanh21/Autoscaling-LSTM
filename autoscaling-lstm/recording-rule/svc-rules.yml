@@ -10,48 +10,120 @@ spec:
     - name: services.rules
       interval: 30s
       rules:
-        # ===== RPS (Micrometer counter), cửa sổ 1 phút =====
+
+        # =====================================================
+        # 1) TRAFFIC / RPS (Micrometer counter) — THEO JOB
+        # =====================================================
         - record: "svc:qps:rate1m"
           expr: |
             sum by (job) (
-              rate(http_server_requests_seconds_count{namespace="apps"}[1m])
+              rate(
+                http_server_requests_seconds_count{namespace="apps"}[1m]
+              )
             )
 
         - record: "svc:qps:rate1m:noactuator"
           expr: |
             sum by (job) (
-              rate(http_server_requests_seconds_count{namespace="apps", uri!~".*actuator.*"}[1m])
+              rate(
+                http_server_requests_seconds_count{
+                  namespace="apps",
+                  uri!~".*actuator.*"
+                }[1m]
+              )
             )
 
-        # ===== p95 latency, 1 phút =====
+        # Rolling mean + lag (features)
+        - record: "svc:rps_roll_mean_5m"
+          expr: |
+            avg_over_time(svc:qps:rate1m[5m])
+
+        - record: "svc:rps_roll_mean_15m"
+          expr: |
+            avg_over_time(svc:qps:rate1m[15m])
+
+        - record: "svc:rps_lag_1m"
+          expr: |
+            svc:qps:rate1m offset 1m
+
+        # =====================================================
+        # 2) LATENCY p95 — THEO JOB
+        # =====================================================
         - record: "svc:latency_p95_s_1m"
           expr: |
             histogram_quantile(
               0.95,
               sum by (le, job) (
-                rate(http_server_requests_seconds_bucket{namespace="apps"}[1m])
+                rate(
+                  http_server_requests_seconds_bucket{namespace="apps"}[1m]
+                )
               )
             )
 
         - record: "svc:latency_p95_ms_1m"
-          expr: 1000 * svc:latency_p95_s_1m
+          expr: |
+            1000 * svc:latency_p95_s_1m
 
-        # ===== SLA violation flag: 1 nếu p95 > 300ms =====
+        # Alias để predictor query "svc:latency_p95_ms"
+        - record: "svc:latency_p95_ms"
+          expr: |
+            svc:latency_p95_ms_1m
+
+        # SLA violation flag (1 nếu p95 > 300ms)
         - record: "svc:sla_violation_1m"
           expr: |
-            (svc:latency_p95_ms_1m > 300)
+            (svc:latency_p95_ms_1m > bool 300)
 
-        # ===== CPU theo POD (cores), 1 phút =====
+        # =====================================================
+        # 3) REPLICAS (Deployment -> job)
+        # =====================================================
+        - record: "svc:replicas:available"
+          expr: |
+            sum by (job) (
+              label_replace(
+                kube_deployment_status_replicas_available{namespace="apps"},
+                "job",
+                "$1",
+                "deployment",
+                "(.*)"
+              )
+            )
+
+        - record: "svc:replicas:available:1m"
+          expr: |
+            last_over_time(svc:replicas:available[1m])
+
+        # Desired replicas theo spec (để so sánh/giải thích over-provisioning)
+        - record: "svc:replicas:spec"
+          expr: |
+            sum by (job) (
+              label_replace(
+                kube_deployment_spec_replicas{namespace="apps"},
+                "job",
+                "$1",
+                "deployment",
+                "(.*)"
+              )
+            )
+
+        - record: "svc:replicas:spec:1m"
+          expr: |
+            last_over_time(svc:replicas:spec[1m])
+
+        # =====================================================
+        # 4) POD-LEVEL RESOURCE (base metrics)
+        # =====================================================
         - record: "pod:cpu:usage1m"
           expr: |
             sum by (namespace, pod) (
-              rate(container_cpu_usage_seconds_total{
-                namespace="apps",
-                container!="POD"
-              }[1m])
+              rate(
+                container_cpu_usage_seconds_total{
+                  namespace="apps",
+                  container!="POD"
+                }[1m]
+              )
             )
 
-        # ===== Memory theo POD (bytes) - gauge =====
         - record: "pod:mem:usage"
           expr: |
             sum by (namespace, pod) (
@@ -60,3 +132,137 @@ spec:
                 container!="POD"
               }
             )
+
+        # Pod-level requests/limits (để tính chi phí theo allocated)
+        - record: "pod:cpu:requests"
+          expr: |
+            sum by (namespace, pod) (
+              kube_pod_container_resource_requests{
+                namespace="apps",
+                resource="cpu",
+                unit="core"
+              }
+            )
+
+        - record: "pod:mem:requests"
+          expr: |
+            sum by (namespace, pod) (
+              kube_pod_container_resource_requests{
+                namespace="apps",
+                resource="memory",
+                unit="byte"
+              }
+            )
+
+        - record: "pod:cpu:limits"
+          expr: |
+            sum by (namespace, pod) (
+              kube_pod_container_resource_limits{
+                namespace="apps",
+                resource="cpu",
+                unit="core"
+              }
+            )
+
+        - record: "pod:mem:limits"
+          expr: |
+            sum by (namespace, pod) (
+              kube_pod_container_resource_limits{
+                namespace="apps",
+                resource="memory",
+                unit="byte"
+              }
+            )
+
+        # =====================================================
+        # 5) SERVICE-LEVEL RESOURCE (pod -> job)
+        # =====================================================
+        - record: "svc:cpu_usage_rate_1m"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:cpu:usage1m{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: "svc:mem_usage"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:mem:usage{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        # Service-level requests/limits (pod -> job)
+        - record: "svc:cpu_requests"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:cpu:requests{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: "svc:mem_requests"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:mem:requests{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: "svc:cpu_limits"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:cpu:limits{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        - record: "svc:mem_limits"
+          expr: |
+            sum by (job) (
+              label_replace(
+                pod:mem:limits{namespace="apps"},
+                "job",
+                "$1",
+                "pod",
+                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+              )
+            )
+
+        # Lag 1m (features)
+        - record: "svc:cpu_usage_rate_lag_1m"
+          expr: |
+            svc:cpu_usage_rate_1m offset 1m
+
+        - record: "svc:mem_usage_lag_1m"
+          expr: |
+            svc:mem_usage offset 1m
+
+        - record: "svc:cpu_requests_lag_1m"
+          expr: |
+            svc:cpu_requests offset 1m
+
+        - record: "svc:mem_requests_lag_1m"
+          expr: |
+            svc:mem_requests offset 1m

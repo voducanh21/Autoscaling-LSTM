@@ -1,7 +1,7 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: product-service-lstm-scaler
+  name: product-lstm
   namespace: apps
 spec:
   scaleTargetRef:
@@ -9,11 +9,16 @@ spec:
   minReplicaCount: 1
   maxReplicaCount: 10
   pollingInterval: 30
-  cooldownPeriod: 300
-
+  cooldownPeriod: 60
+  advanced:
+    restoreToOriginalReplicaCount: false
   triggers:
-    - type: external
+    - type: prometheus
       metadata:
-        scalerAddress: predictor-exporter-product-service.model.svc.cluster.local:9101
-        metricName: lstm_pred_rps_product_service
-        targetValue: "200"
+        serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
+        metricName: lstm_desired_replicas
+        query: lstm_desired_replicas{service="predictor-exporter-product"}
+        threshold: "1"
+  fallback:
+    failureThreshold: 3
+    replicas: 2

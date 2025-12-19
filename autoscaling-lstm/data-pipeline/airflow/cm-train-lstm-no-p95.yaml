@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: train-lstm-script
+  name: train-lstm-script-no-p95
   namespace: cronjob
 data:
   train_lstm.py: |
@@ -85,8 +85,6 @@ data:
     TEST_FRAC = 1.0 - TRAIN_FRAC - VAL_FRAC
 
     TRAIN_SEED = int(os.getenv("TRAIN_SEED", "42"))
-
-    # User asked to log per-service TEST MAE (RPS)
     LOG_TEST_PER_SERVICE = os.getenv("LOG_TEST_PER_SERVICE", "true").lower() == "true"
 
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
@@ -107,7 +105,7 @@ data:
 
     MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast")
     EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME)
-    FEATURE_SET = "with_roll_lag"
+    FEATURE_SET = "with_roll_lag_no_p95"
 
     # =============================
     # MLflow hardening
@@ -139,7 +137,7 @@ data:
     # =============================
     # S3 load
     # =============================
-    print(f"[INFO] Start | model={MODEL_NAME} exp={EXPERIMENT_NAME} window={WINDOW_SIZE} horizon_min={HORIZON_MINUTES} split=80/10/10")
+    print(f"[INFO] Start | model={MODEL_NAME} exp={EXPERIMENT_NAME} window={WINDOW_SIZE} horizon_min={HORIZON_MINUTES} split=80/10/10 (no p95)")
 
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
     prefix = f"{BUCKET}/{SILVER_PREFIX}/"
@@ -211,11 +209,14 @@ data:
     num_services = len(FIXED_ORDER)
 
     target_cols = ["rps_future", "cpu_future", "mem_future"]
+
+    # NOTE: latency_p95_ms removed
     FAIRNESS_FILTER_COLS = [
-        "rps_1m","latency_p95_ms","cpu_norm","mem_norm",
+        "rps_1m","cpu_norm","mem_norm",
         "rps_roll_mean_5m","rps_roll_mean_15m","rps_lag_1m","cpu_lag_1m","mem_lag_1m",
         "hour","dow"
     ]
+
     missing = [c for c in (target_cols + FAIRNESS_FILTER_COLS) if c not in df.columns]
     if missing:
         print(f"[ERROR] Missing columns in silver: {missing}", file=sys.stderr)
@@ -232,7 +233,8 @@ data:
     df = df[keep_cols].dropna().reset_index(drop=True)
     rows_after_filter = int(len(df))
 
-    LOG1P_COLS = ["rps_1m", "latency_p95_ms", "rps_roll_mean_5m", "rps_roll_mean_15m", "rps_lag_1m"]
+    # NOTE: latency_p95_ms removed
+    LOG1P_COLS = ["rps_1m", "rps_roll_mean_5m", "rps_roll_mean_15m", "rps_lag_1m"]
 
     def add_cyclical_time_features(g: pd.DataFrame) -> pd.DataFrame:
         h = g["hour"].astype(float).values
@@ -243,9 +245,9 @@ data:
         g["dow_cos"]  = np.cos(2.0 * np.pi * d / 7.0)
         return g
 
+    # NOTE: latency_p95_ms_log1p removed
     input_cols = [
         "rps_1m_log1p",
-        "latency_p95_ms_log1p",
         "cpu_norm",
         "mem_norm",
         "rps_roll_mean_5m_log1p",
@@ -415,8 +417,8 @@ data:
         train_end_day = picked_dates[train_end_i]
         val_end_day   = picked_dates[val_end_i]
 
-        train_end_ns = to_utc_ns_day_start(train_end_day)  # val starts
-        val_end_ns   = to_utc_ns_day_start(val_end_day)    # test starts
+        train_end_ns = to_utc_ns_day_start(train_end_day)
+        val_end_ns   = to_utc_ns_day_start(val_end_day)
     else:
         split_mode = "timestamp_quantiles_fallback"
         all_labels = []
@@ -603,22 +605,15 @@ data:
         log_metric_safe("final_fit_s", fit_s, step=200)
         log_metric_safe("final_epochs_trained", epochs_trained, step=200)
 
-        # =============================
-        # VAL metrics (requested)
-        # =============================
+        # VAL metrics
         y_val_pred = model.predict([X_val, S_val], verbose=0)
-
         val_wape_rps = float(wape(y_val[:, 0], y_val_pred[:, 0]))
         val_mae_rps  = float(mean_absolute_error(y_val[:, 0], y_val_pred[:, 0]))
-
         log_metric_safe("val_wape_rps", val_wape_rps, step=210)
         log_metric_safe("val_mae_rps",  val_mae_rps,  step=210)
 
-        # =============================
-        # TEST metrics (final)
-        # =============================
+        # TEST metrics
         y_test_pred = model.predict([X_test, S_test], verbose=0)
-
         test_wape_rps = float(wape(y_test[:, 0], y_test_pred[:, 0]))
         test_mae_rps  = float(mean_absolute_error(y_test[:, 0], y_test_pred[:, 0]))
         test_mae_cpu  = float(mean_absolute_error(y_test[:, 1], y_test_pred[:, 1]))
@@ -646,9 +641,7 @@ data:
         log_metric_safe("baseline_test_mae_mem",  baseline_test_mae_mem,  step=300)
         log_metric_safe("improve_test_mae_mem",   improve_test_mae_mem,   step=300)
 
-        # =============================
-        # TEST per-service MAE RPS (requested)
-        # =============================
+        # TEST per-service MAE RPS
         def _svc_mask(S_arr: np.ndarray, svc_id: int) -> np.ndarray:
             return (S_arr[:, 0].astype(int) == int(svc_id))
 
@@ -659,9 +652,7 @@ data:
                     mae = float(mean_absolute_error(y_test[m, 0], y_test_pred[m, 0]))
                     log_metric_safe(f"test_mae_rps_{svc.replace('-', '_')}", mae, step=310)
 
-        # =============================
         # Log model WITHOUT triggering mlflow "model metrics" logging
-        # =============================
         tmp_dir = "/tmp/mlflow_model"
         try:
             if os.path.exists(tmp_dir):

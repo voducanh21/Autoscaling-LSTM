@@ -1,20 +1,24 @@
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: api-gateway-scaledobject
-  namespace: apps           # ⚠️ trùng với namespace của Deployment
+  name: api-gateway-lstm
+  namespace: apps
 spec:
   scaleTargetRef:
     name: api-gateway
   minReplicaCount: 1
   maxReplicaCount: 10
-  pollingInterval: 15
+  pollingInterval: 30
   cooldownPeriod: 60
-
+  advanced:
+    restoreToOriginalReplicaCount: false
   triggers:
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-operated.monitoring.svc.cluster.local:9090
         metricName: lstm_desired_replicas
-        query: lstm_desired_replicas
+        query: lstm_desired_replicas{service="predictor-exporter-api-gateway"}
         threshold: "1"
+  fallback:
+    failureThreshold: 3
+    replicas: 2

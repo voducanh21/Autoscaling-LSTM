@@ -39,32 +39,32 @@
       ]
     },
     {
-      "title": "CPU – Observed vs Predicted",
+      "title": "CPU – Observed vs Predicted (norm)",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pod:cpu:usage1m{namespace=\"apps\", pod=~\"($service)-.*\"} * 1000",
-          "legendFormat": "observed_cpu ({{pod}})"
+          "expr": "pod:cpu:usage1m{namespace=\"apps\", pod=~\"($service)-.*\"}",
+          "legendFormat": "observed_cpu_norm ({{pod}})"
         },
         {
           "expr": "lstm_pred_cpu{exported_service=~\"$service\"}",
-          "legendFormat": "pred_cpu ({{exported_service}})"
+          "legendFormat": "pred_cpu_norm ({{exported_service}})"
         }
       ]
     },
     {
-      "title": "Memory – Observed vs Predicted",
+      "title": "Memory – Observed vs Predicted (norm)",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pod:mem:usage{namespace=\"apps\", pod=~\"($service)-.*\"} / 1024 / 1024",
-          "legendFormat": "observed_mem ({{pod}})"
+          "expr": "pod:mem:usage{namespace=\"apps\", pod=~\"($service)-.*\"} / 1073741824",
+          "legendFormat": "observed_mem_norm ({{pod}})"
         },
         {
           "expr": "lstm_pred_mem{exported_service=~\"$service\"}",
-          "legendFormat": "pred_mem ({{exported_service}})"
+          "legendFormat": "pred_mem_norm ({{exported_service}})"
         }
       ]
     },

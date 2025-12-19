@@ -28,6 +28,8 @@ spec:
             - -c
             - |
               set -e
+              export PYTHONUNBUFFERED=1
+              export PIP_DISABLE_PIP_VERSION_CHECK=1
               pip install --no-cache-dir prometheus_client requests
               echo "[EXPORTER] Dependencies installed, starting exporter..."
               exec python /app/predictor_exporter.py
@@ -39,11 +41,27 @@ spec:
             - name: EXPORT_PORT
               value: "9101"
             - name: INTERVAL_SECONDS
+              value: "60"
+            - name: PROM_TIMEOUT_SECONDS
               value: "5"
+            - name: MODEL_TIMEOUT_SECONDS
+              value: "10"
+
             - name: TARGET_RPS_PER_POD
-              value: "350"
+              value: "200"
             - name: APP_JOB
               value: "payment-service"
+            - name: SERVICE_NAME
+              value: "payment-service"
+            - name: WINDOW_SIZE
+              value: "10"
+            - name: TIMEZONE
+              value: "Asia/Ho_Chi_Minh"
+
+            - name: APPS_NAMESPACE
+              value: "apps"
+            - name: MEM_LIMIT_BYTES
+              value: "1073741824"
           ports:
             - name: http-metrics
               containerPort: 9101
@@ -90,10 +108,9 @@ metadata:
   labels:
     release: kube-prometheus
 spec:
-  jobLabel: app
+  jobLabel: service
   namespaceSelector:
-    matchNames:
-      - model
+    matchNames: [model]
   selector:
     matchLabels:
       app: predictor-exporter
@@ -101,5 +118,10 @@ spec:
   endpoints:
     - port: http-metrics
       path: /metrics
-      interval: 30s
-      scrapeTimeout: 10s
+      interval: 60s
+      scrapeTimeout: 5s
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'lstm_(pred_rps|pred_cpu|pred_mem|desired_replicas)'
+          action: keep
+      sampleLimit: 20

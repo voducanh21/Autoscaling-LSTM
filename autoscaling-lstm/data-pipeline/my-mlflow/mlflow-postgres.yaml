@@ -1,4 +1,4 @@
-apiVersion: v1
+mapiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: mlflow-postgres-pvc

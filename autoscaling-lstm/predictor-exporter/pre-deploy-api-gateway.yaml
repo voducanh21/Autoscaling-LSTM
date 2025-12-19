@@ -28,6 +28,8 @@ spec:
             - -c
             - |
               set -e
+              export PYTHONUNBUFFERED=1
+              export PIP_DISABLE_PIP_VERSION_CHECK=1
               pip install --no-cache-dir prometheus_client requests
               echo "[EXPORTER] Dependencies installed, starting exporter..."
               exec python /app/predictor_exporter.py
@@ -38,12 +40,32 @@ spec:
               value: "http://lstm-serving.model.svc.cluster.local:8080/predict"
             - name: EXPORT_PORT
               value: "9101"
+
+            # Align timestep with training (silver asfreq=1min)
             - name: INTERVAL_SECONDS
+              value: "60"
+
+            # Prometheus API timeout
+            - name: PROM_TIMEOUT_SECONDS
               value: "5"
+            - name: MODEL_TIMEOUT_SECONDS
+              value: "10"
+
             - name: TARGET_RPS_PER_POD
-              value: "400"
+              value: "350"
             - name: APP_JOB
               value: "api-gateway"
+            - name: SERVICE_NAME
+              value: "api-gateway"
+            - name: WINDOW_SIZE
+              value: "10"
+            - name: TIMEZONE
+              value: "Asia/Ho_Chi_Minh"
+
+            - name: APPS_NAMESPACE
+              value: "apps"
+            - name: MEM_LIMIT_BYTES
+              value: "1073741824"
           ports:
             - containerPort: 9101
               name: http-metrics
@@ -71,7 +93,7 @@ metadata:
   labels:
     app: predictor-exporter
     service: api-gateway
-    release: kube-prometheus   # <-- BẮT BUỘC PHẢI CÓ
+    release: kube-prometheus
 spec:
   type: ClusterIP
   ports:
@@ -88,9 +110,10 @@ metadata:
   name: predictor-exporter-api-gateway
   namespace: model
   labels:
-    release: kube-prometheus      # <-- MATCH Prometheus Selector
+    release: kube-prometheus
 spec:
-  jobLabel: app
+  # job label = service (api-gateway), dễ query + tránh job trùng
+  jobLabel: service
   namespaceSelector:
     matchNames:
       - model
@@ -101,5 +124,14 @@ spec:
   endpoints:
     - port: http-metrics
       path: /metrics
-      interval: 30s
-      scrapeTimeout: 10s
+      interval: 60s
+      scrapeTimeout: 5s
+
+      # chỉ lưu 4 metric lstm_*
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'lstm_(pred_rps|pred_cpu|pred_mem|desired_replicas)'
+          action: keep
+
+      # chặn trường hợp exporter lỡ export nhiều metric
+      sampleLimit: 20
