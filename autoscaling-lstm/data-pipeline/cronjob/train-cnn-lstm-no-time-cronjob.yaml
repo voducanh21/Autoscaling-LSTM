@@ -1,0 +1,135 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: train-cnn-lstm-cronjob-no-time
+  namespace: cronjob
+spec:
+  schedule: "0 */6 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+          serviceAccountName: register-model-sa
+
+          containers:
+            - name: train-cnn-lstm-no-time
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[INFO] Start training CNN+LSTM (no-time)..."
+                  python /app/train_cnn_lstm_no_time.py
+                  echo "[INFO] Training done."
+
+              env:
+                # --- S3 / MinIO ---
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_S3_ENDPOINT_URL
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_ARTIFACT_ROOT
+                  value: "s3://datalake/mlflow"
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: "s3://datalake/mlflow"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                # --- MLflow ---
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+
+                # --- Training Params ---
+                - name: WINDOW_SIZE
+                  value: "10"
+                - name: EPOCHS
+                  value: "20"
+                - name: BATCH_SIZE
+                  value: "128"
+                - name: HORIZON_MINUTES
+                  value: "5"
+
+                # --- Split 80/10/10 ---
+                - name: TRAIN_FRAC
+                  value: "0.80"
+                - name: VAL_FRAC
+                  value: "0.10"
+                - name: EXTRA_EMBARGO_MINUTES
+                  value: "0"
+
+                # --- FULL DATA MODE ---
+                - name: DATE_FRACTION
+                  value: "1.0"
+                - name: DATE_PICK_MODE
+                  value: "all"
+                - name: DATE_SEED
+                  value: "42"
+
+                # --- CNN+LSTM hyperparams (keep same as base) ---
+                - name: CNN_FILTERS_1
+                  value: "64"
+                - name: CNN_FILTERS_2
+                  value: "64"
+                - name: CNN_KERNEL_SIZE
+                  value: "3"
+                - name: CNN_DROPOUT
+                  value: "0.2"
+                - name: LSTM_UNITS
+                  value: "64"
+                - name: LSTM_DROPOUT
+                  value: "0.2"
+                - name: SERVICE_EMB_DIM
+                  value: "8"
+                - name: HEAD_UNITS
+                  value: "64"
+                - name: LR
+                  value: "0.001"
+
+                # --- Default: train-only (no register) ---
+                - name: REGISTER_MODEL
+                  value: "false"
+
+                # --- MINIO credentials ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+                # --- Model / Experiment ---
+                - name: MODEL_NAME
+                  value: "cnn_lstm_forecast_no_time"
+                - name: EXPERIMENT_NAME
+                  value: "cnn_lstm_forecast_no_time"
+
+                # --- Promotion knobs (optional; kept for structure parity) ---
+                - name: REQUIRE_BOTH_RPS_AND_CPU
+                  value: "true"
+                - name: PROMOTION_EPS
+                  value: "0.0"
+                - name: REQUIRE_BEAT_BASELINE_TEST_WAPE
+                  value: "false"
+
+              volumeMounts:
+                - name: train-cnn-lstm-script-no-time
+                  mountPath: /app
+                  readOnly: true
+
+          volumes:
+            - name: train-cnn-lstm-script-no-time
+              configMap:
+                name: train-cnn-lstm-script-no-time
