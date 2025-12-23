@@ -1,11 +1,11 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: train-lstm-cronjob-no-p95
+  name: train-tcn-cronjob
   namespace: cronjob
 spec:
-  schedule: "0 */6 * * *"         # chạy mỗi 6 tiếng
-  suspend: true                   # disable mặc định
+  schedule: "0 */6 * * *"
+  suspend: true
   jobTemplate:
     spec:
       template:
@@ -13,22 +13,19 @@ spec:
           restartPolicy: Never
           nodeSelector:
             kubernetes.io/hostname: k3n-m03
-
-          # test-only: không cần quyền patch/restart
-          serviceAccountName: default
+          serviceAccountName: register-model-sa
 
           containers:
-            - name: train-lstm
+            - name: train-tcn
               image: ducanhvo/train-lstm:latest
               imagePullPolicy: Always
-
               command: ["/bin/sh", "-c"]
               args:
                 - |
                   set -e
-                  echo "[INFO] Start training LSTM (no p95, test-only)..."
-                  python /app/train_lstm.py
-                  echo "[INFO] Done (no registry, no k8s patch)."
+                  echo "[INFO] Start training TCN..."
+                  python /app/train_tcn.py
+                  echo "[INFO] Training done."
 
               env:
                 # --- S3 / MinIO ---
@@ -59,7 +56,11 @@ spec:
                 - name: BATCH_SIZE
                   value: "128"
 
-                # --- Split (80/10/10) ---
+                # --- Horizon ---
+                - name: HORIZON_MINUTES
+                  value: "5"
+
+                # --- Split 80/10/10 ---
                 - name: TRAIN_FRAC
                   value: "0.80"
                 - name: VAL_FRAC
@@ -75,6 +76,20 @@ spec:
                 - name: DATE_SEED
                   value: "42"
 
+                # --- TCN hyperparams ---
+                - name: TCN_FILTERS
+                  value: "64"
+                - name: TCN_KERNEL_SIZE
+                  value: "3"
+                - name: TCN_DILATIONS
+                  value: "1,2,4,8,16"
+                - name: TCN_DROPOUT
+                  value: "0.2"
+                - name: SERVICE_EMB_DIM
+                  value: "8"
+                - name: LR
+                  value: "0.001"
+
                 # --- MINIO credentials ---
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:
@@ -89,20 +104,16 @@ spec:
 
                 # --- Model / Experiment ---
                 - name: MODEL_NAME
-                  value: "lstm_forecast_no_p95"
+                  value: "tcn_forecast"
                 - name: EXPERIMENT_NAME
-                  value: "lstm_forecast_no_p95"
-
-                # Optional: log per-service test MAE RPS
-                - name: LOG_TEST_PER_SERVICE
-                  value: "true"
+                  value: "tcn_forecast"
 
               volumeMounts:
-                - name: train-lstm-script-no-p95
+                - name: train-tcn-script
                   mountPath: /app
                   readOnly: true
 
           volumes:
-            - name: train-lstm-script-no-p95
+            - name: train-tcn-script
               configMap:
-                name: train-lstm-script-no-p95
+                name: train-tcn-script

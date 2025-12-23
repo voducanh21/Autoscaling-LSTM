@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: train-lstm-script-no-p95
+  name: train-tcn-script
   namespace: cronjob
 data:
-  train_lstm.py: |
+  train_tcn.py: |
     import os, sys, math, time, hashlib, random, gc, shutil, warnings
 
     # =============================
@@ -26,7 +26,10 @@ data:
     from zoneinfo import ZoneInfo
 
     import tensorflow as tf
-    from tensorflow.keras.layers import Input, Embedding, LSTM, Dense, Dropout, Concatenate, Normalization
+    from tensorflow.keras.layers import (
+        Input, Embedding, Dense, Dropout, Concatenate, Normalization,
+        Conv1D, LayerNormalization, Add, Activation, Lambda
+    )
     from tensorflow.keras.models import Model
     from tensorflow.keras.optimizers import Adam
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
@@ -56,6 +59,15 @@ data:
         np.random.seed(seed)
         tf.random.set_seed(seed)
 
+    def parse_int_list(s: str, default):
+        if not s:
+            return default
+        try:
+            xs = [int(x.strip()) for x in s.split(",") if x.strip() != ""]
+            return xs or default
+        except Exception:
+            return default
+
     # =============================
     # ENV
     # =============================
@@ -76,6 +88,7 @@ data:
     EXTRA_EMBARGO_MINUTES = int(os.getenv("EXTRA_EMBARGO_MINUTES", "0"))
     EXTRA_EMBARGO_NS = int(EXTRA_EMBARGO_MINUTES) * 60 * 1_000_000_000
 
+    # Fixed split: 80/10/10 (time-based)
     TRAIN_FRAC = float(os.getenv("TRAIN_FRAC", "0.80"))
     VAL_FRAC   = float(os.getenv("VAL_FRAC", "0.10"))
     if TRAIN_FRAC <= 0 or VAL_FRAC <= 0 or (TRAIN_FRAC + VAL_FRAC) >= 1.0:
@@ -85,6 +98,7 @@ data:
 
     TRAIN_SEED = int(os.getenv("TRAIN_SEED", "42"))
 
+    # Per-service metrics
     LOG_TEST_PER_SERVICE = os.getenv("LOG_TEST_PER_SERVICE", "true").lower() == "true"
     MIN_P95_SAMPLES = int(os.getenv("MIN_P95_SAMPLES", "50"))
 
@@ -104,9 +118,17 @@ data:
     DATE_SEED = int(os.getenv("DATE_SEED", "42"))
     set_global_seed(DATE_SEED)
 
-    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast_no_p95")
+    MODEL_NAME = os.getenv("MODEL_NAME", "tcn_forecast")
     EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME)
-    FEATURE_SET = "no_p95_with_roll_lag"
+    FEATURE_SET = os.getenv("FEATURE_SET", "with_roll_lag")
+
+    # --- TCN hyperparams ---
+    TCN_FILTERS = int(os.getenv("TCN_FILTERS", "64"))
+    TCN_KERNEL  = int(os.getenv("TCN_KERNEL_SIZE", "3"))
+    TCN_DILATIONS = parse_int_list(os.getenv("TCN_DILATIONS", "1,2,4,8,16"), [1,2,4,8,16])
+    TCN_DROPOUT = float(os.getenv("TCN_DROPOUT", "0.2"))
+    EMB_DIM = int(os.getenv("SERVICE_EMB_DIM", "8"))
+    LR = float(os.getenv("LR", "0.001"))
 
     # =============================
     # MLflow hardening
@@ -138,7 +160,7 @@ data:
     # =============================
     # S3 load
     # =============================
-    print(f"[INFO] Start | model={MODEL_NAME} exp={EXPERIMENT_NAME} window={WINDOW_SIZE} horizon_min={HORIZON_MINUTES} split=80/10/10 (NO p95 input)")
+    print(f"[INFO] Start | model={MODEL_NAME} exp={EXPERIMENT_NAME} window={WINDOW_SIZE} horizon_min={HORIZON_MINUTES} split=80/10/10")
 
     fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
     prefix = f"{BUCKET}/{SILVER_PREFIX}/"
@@ -210,31 +232,28 @@ data:
     num_services = len(FIXED_ORDER)
 
     target_cols = ["rps_future", "cpu_future", "mem_future"]
-
-    # NOTE: removed latency_p95_ms from required columns (NO p95 input)
-    REQUIRED_COLS = [
-        "rps_1m","cpu_norm","mem_norm",
+    FAIRNESS_FILTER_COLS = [
+        "rps_1m","latency_p95_ms","cpu_norm","mem_norm",
         "rps_roll_mean_5m","rps_roll_mean_15m","rps_lag_1m","cpu_lag_1m","mem_lag_1m",
         "hour","dow"
     ]
-    missing = [c for c in (target_cols + REQUIRED_COLS) if c not in df.columns]
+    missing = [c for c in (target_cols + FAIRNESS_FILTER_COLS) if c not in df.columns]
     if missing:
         print(f"[ERROR] Missing columns in silver: {missing}", file=sys.stderr)
         sys.exit(1)
 
-    df = df.dropna(subset=target_cols + REQUIRED_COLS)
+    df = df.dropna(subset=target_cols + FAIRNESS_FILTER_COLS)
 
     keep_cols = list(dict.fromkeys(
         (["ts"] if "ts" in df.columns else [])
-        + REQUIRED_COLS
+        + FAIRNESS_FILTER_COLS
         + target_cols
         + ["service","service_id","date_part","__row_order"]
     ))
     df = df[keep_cols].dropna().reset_index(drop=True)
     rows_after_filter = int(len(df))
 
-    # NOTE: removed latency_p95_ms from log1p columns (NO p95 input)
-    LOG1P_COLS = ["rps_1m", "rps_roll_mean_5m", "rps_roll_mean_15m", "rps_lag_1m"]
+    LOG1P_COLS = ["rps_1m", "latency_p95_ms", "rps_roll_mean_5m", "rps_roll_mean_15m", "rps_lag_1m"]
 
     def add_cyclical_time_features(g: pd.DataFrame) -> pd.DataFrame:
         h = g["hour"].astype(float).values
@@ -245,9 +264,9 @@ data:
         g["dow_cos"]  = np.cos(2.0 * np.pi * d / 7.0)
         return g
 
-    # NOTE: removed latency_p95_ms_log1p from input_cols (NO p95 input)
     input_cols = [
         "rps_1m_log1p",
+        "latency_p95_ms_log1p",
         "cpu_norm",
         "mem_norm",
         "rps_roll_mean_5m_log1p",
@@ -342,6 +361,15 @@ data:
                 base_rps = g2["rps_1m"].astype(np.float32).values
                 base_cpu = g2["cpu_norm"].astype(np.float32).values
                 base_mem = g2["mem_norm"].astype(np.float32).values
+                ts_s3 = g2[time_col]
+                if pd.api.types.is_datetime64tz_dtype(ts_s3):
+                    ts_utc = ts_s3.dt.tz_convert("UTC")
+                else:
+                    try:
+                        ts_utc = ts_s3.dt.tz_localize(TZ).dt.tz_convert("UTC")
+                    except Exception:
+                        ts_utc = pd.to_datetime(ts_s3, errors="coerce", utc=True)
+                ts_utc = ts_utc.dropna()
 
         ts_ns = ts_utc.view("int64").to_numpy(dtype=np.int64)
         if len(X_raw) <= window:
@@ -358,7 +386,7 @@ data:
         for i in range(n):
             Xs[i] = X_raw[i:i+window]
             ys[i] = y_raw[i+window]
-            Ss[i] = sid
+            Ss[i] = sid  # broadcast fill
             Bs[i] = [base_rps[i+window-1], base_cpu[i+window-1], base_mem[i+window-1]]
             lab = int(ts_ns[i+window])
             label_ns[i] = lab
@@ -445,23 +473,60 @@ data:
     train_target_cut_ns = int(train_end_ns) - int(EXTRA_EMBARGO_NS)
 
     # =============================
-    # Model builder
+    # TCN blocks (causal dilated residual)
+    # =============================
+    def tcn_residual_block(x, filters: int, kernel_size: int, dilation: int, dropout: float, name: str):
+        inp = x
+
+        y = Conv1D(filters, kernel_size, padding="causal", dilation_rate=dilation, name=f"{name}_c1")(x)
+        y = LayerNormalization(name=f"{name}_ln1")(y)
+        y = Activation("relu", name=f"{name}_a1")(y)
+        y = Dropout(dropout, name=f"{name}_d1")(y)
+
+        y = Conv1D(filters, kernel_size, padding="causal", dilation_rate=dilation, name=f"{name}_c2")(y)
+        y = LayerNormalization(name=f"{name}_ln2")(y)
+        y = Activation("relu", name=f"{name}_a2")(y)
+        y = Dropout(dropout, name=f"{name}_d2")(y)
+
+        # match channels if needed
+        if int(inp.shape[-1]) != int(y.shape[-1]):
+            inp = Conv1D(filters, 1, padding="same", name=f"{name}_proj")(inp)
+
+        out = Add(name=f"{name}_add")([inp, y])
+        out = Activation("relu", name=f"{name}_out")(out)
+        return out
+
+    # =============================
+    # Model builder (single model, multi-service)
     # =============================
     def build_model(feat_norm_layer: Normalization):
         ts_input = Input(shape=(WINDOW_SIZE, len(input_cols)), name="timeseries")
         svc_input = Input(shape=(WINDOW_SIZE,), name="service_id")
 
         ts_normed = feat_norm_layer(ts_input)
-        emb = Embedding(input_dim=num_services, output_dim=8, name="service_embedding")(svc_input)
-        merged = Concatenate(axis=-1)([ts_normed, emb])
+        emb = Embedding(input_dim=num_services, output_dim=EMB_DIM, name="service_embedding")(svc_input)
+        x = Concatenate(axis=-1, name="concat_feat_emb")([ts_normed, emb])
 
-        x = LSTM(128, return_sequences=True)(merged)
-        x = Dropout(0.2)(x)
-        x = LSTM(64)(x)
-        out = Dense(3)(x)
+        # TCN stack
+        for i, d in enumerate(TCN_DILATIONS):
+            x = tcn_residual_block(
+                x,
+                filters=TCN_FILTERS,
+                kernel_size=TCN_KERNEL,
+                dilation=int(d),
+                dropout=TCN_DROPOUT,
+                name=f"tcn_b{i}_d{d}"
+            )
 
-        model = Model(inputs=[ts_input, svc_input], outputs=out)
-        model.compile(optimizer=Adam(1e-3), loss="mae")
+        # take last timestep (causal)
+        x = Lambda(lambda t: t[:, -1, :], name="take_last")(x)
+
+        x = Dense(128, activation="relu", name="head_dense1")(x)
+        x = Dropout(0.2, name="head_drop")(x)
+        out = Dense(3, name="y_hat")(x)  # [rps_future, cpu_future, mem_future]
+
+        model = Model(inputs=[ts_input, svc_input], outputs=out, name="tcn_forecast")
+        model.compile(optimizer=Adam(LR), loss="mae")
         return model
 
     # =============================
@@ -499,6 +564,14 @@ data:
         log_param_safe("split_test_start_day", val_end_day)
         log_param_safe("log_test_per_service", LOG_TEST_PER_SERVICE)
         log_param_safe("min_p95_samples", MIN_P95_SAMPLES)
+
+        # TCN params
+        log_param_safe("tcn_filters", TCN_FILTERS)
+        log_param_safe("tcn_kernel_size", TCN_KERNEL)
+        log_param_safe("tcn_dilations", ",".join(map(str, TCN_DILATIONS)))
+        log_param_safe("tcn_dropout", TCN_DROPOUT)
+        log_param_safe("service_emb_dim", EMB_DIM)
+        log_param_safe("lr", LR)
 
         # minimal data health
         log_metric_safe("n_rows_loaded", n_rows_loaded, step=0)
@@ -632,7 +705,7 @@ data:
         log_metric_safe("test_mae_cpu",  test_mae_cpu,  step=300)
         log_metric_safe("test_mae_mem",  test_mae_mem,  step=300)
 
-        # p95 absolute error (RPS) + under-prediction rate (RPS)
+        # p95 abs error (RPS) + under-prediction rate (RPS)
         abs_err_rps = np.abs(y_test[:, 0] - y_test_pred[:, 0]).astype(np.float64)
         test_p95_abs_err_rps = float(np.percentile(abs_err_rps, 95))
         test_under_rate_rps = float(np.mean(y_test_pred[:, 0] < y_test[:, 0]))
@@ -640,7 +713,7 @@ data:
         log_metric_safe("test_p95_abs_err_rps", test_p95_abs_err_rps, step=300)
         log_metric_safe("test_under_rate_rps",  test_under_rate_rps,  step=300)
 
-        # Baseline comparisons on TEST
+        # Baseline comparisons on TEST (last observed as baseline)
         baseline_test_wape_rps = float(wape(y_test[:, 0], B_test[:, 0]))
         improve_test_wape_rps  = float(baseline_test_wape_rps - test_wape_rps)
 
@@ -679,7 +752,7 @@ data:
                     log_metric_safe(f"test_p95_abs_err_rps_{svc.replace('-', '_')}", p95, step=310)
 
         # =============================
-        # Log model
+        # Log model WITHOUT triggering mlflow "model metrics" logging
         # =============================
         tmp_dir = "/tmp/mlflow_model"
         try:
@@ -703,6 +776,7 @@ data:
             except Exception:
                 pass
 
+        # cleanup
         tf.keras.backend.clear_session()
         del model, feat_norm, hist, y_val_pred, y_test_pred
         del X_tr, y_tr, S_tr, X_val, y_val, S_val, B_val, X_test, y_test, S_test, B_test

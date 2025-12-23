@@ -86,8 +86,11 @@ data:
 
     TRAIN_SEED = int(os.getenv("TRAIN_SEED", "42"))
 
-    # User asked to log per-service TEST MAE (RPS)
+    # Per-service metrics
     LOG_TEST_PER_SERVICE = os.getenv("LOG_TEST_PER_SERVICE", "true").lower() == "true"
+
+    # NEW: Minimum samples for per-service p95 (avoid unstable p95 when too few points)
+    MIN_P95_SAMPLES = int(os.getenv("MIN_P95_SAMPLES", "50"))
 
     TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
     try:
@@ -496,6 +499,7 @@ data:
         log_param_safe("split_train_end_day", train_end_day)
         log_param_safe("split_test_start_day", val_end_day)
         log_param_safe("log_test_per_service", LOG_TEST_PER_SERVICE)
+        log_param_safe("min_p95_samples", MIN_P95_SAMPLES)
 
         # minimal data health
         log_metric_safe("n_rows_loaded", n_rows_loaded, step=0)
@@ -604,7 +608,7 @@ data:
         log_metric_safe("final_epochs_trained", epochs_trained, step=200)
 
         # =============================
-        # VAL metrics (requested)
+        # VAL metrics
         # =============================
         y_val_pred = model.predict([X_val, S_val], verbose=0)
 
@@ -615,7 +619,7 @@ data:
         log_metric_safe("val_mae_rps",  val_mae_rps,  step=210)
 
         # =============================
-        # TEST metrics (final)
+        # TEST metrics
         # =============================
         y_test_pred = model.predict([X_test, S_test], verbose=0)
 
@@ -628,6 +632,14 @@ data:
         log_metric_safe("test_mae_rps",  test_mae_rps,  step=300)
         log_metric_safe("test_mae_cpu",  test_mae_cpu,  step=300)
         log_metric_safe("test_mae_mem",  test_mae_mem,  step=300)
+
+        # NEW: p95 absolute error (RPS) + under-prediction rate (RPS)
+        abs_err_rps = np.abs(y_test[:, 0] - y_test_pred[:, 0]).astype(np.float64)
+        test_p95_abs_err_rps = float(np.percentile(abs_err_rps, 95))
+        test_under_rate_rps = float(np.mean(y_test_pred[:, 0] < y_test[:, 0]))
+
+        log_metric_safe("test_p95_abs_err_rps", test_p95_abs_err_rps, step=300)
+        log_metric_safe("test_under_rate_rps",  test_under_rate_rps,  step=300)
 
         # Baseline comparisons on TEST
         baseline_test_wape_rps = float(wape(y_test[:, 0], B_test[:, 0]))
@@ -647,7 +659,7 @@ data:
         log_metric_safe("improve_test_mae_mem",   improve_test_mae_mem,   step=300)
 
         # =============================
-        # TEST per-service MAE RPS (requested)
+        # TEST per-service MAE RPS + p95_abs_err RPS
         # =============================
         def _svc_mask(S_arr: np.ndarray, svc_id: int) -> np.ndarray:
             return (S_arr[:, 0].astype(int) == int(svc_id))
@@ -655,9 +667,18 @@ data:
         if LOG_TEST_PER_SERVICE:
             for svc, sid in SERVICE_TO_ID.items():
                 m = _svc_mask(S_test, sid)
-                if np.any(m):
-                    mae = float(mean_absolute_error(y_test[m, 0], y_test_pred[m, 0]))
-                    log_metric_safe(f"test_mae_rps_{svc.replace('-', '_')}", mae, step=310)
+                n_m = int(np.sum(m))
+                if n_m <= 0:
+                    continue
+
+                mae = float(mean_absolute_error(y_test[m, 0], y_test_pred[m, 0]))
+                log_metric_safe(f"test_mae_rps_{svc.replace('-', '_')}", mae, step=310)
+
+                # NEW: per-service p95 abs error (RPS) - only if enough samples
+                if n_m >= MIN_P95_SAMPLES:
+                    abs_err = np.abs(y_test[m, 0] - y_test_pred[m, 0]).astype(np.float64)
+                    p95 = float(np.percentile(abs_err, 95))
+                    log_metric_safe(f"test_p95_abs_err_rps_{svc.replace('-', '_')}", p95, step=310)
 
         # =============================
         # Log model WITHOUT triggering mlflow "model metrics" logging

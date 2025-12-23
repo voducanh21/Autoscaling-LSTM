@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: train-lstm-cronjob-no-p95
+  name: train-lstm-cronjob-no-roll
   namespace: cronjob
 spec:
   schedule: "0 */6 * * *"         # chạy mỗi 6 tiếng
@@ -26,7 +26,7 @@ spec:
               args:
                 - |
                   set -e
-                  echo "[INFO] Start training LSTM (no p95, test-only)..."
+                  echo "[INFO] Start training LSTM (no roll, test-only)..."
                   python /app/train_lstm.py
                   echo "[INFO] Done (no registry, no k8s patch)."
 
@@ -89,20 +89,20 @@ spec:
 
                 # --- Model / Experiment ---
                 - name: MODEL_NAME
-                  value: "lstm_forecast_no_p95"
+                  value: "lstm_forecast_no_roll"
                 - name: EXPERIMENT_NAME
-                  value: "lstm_forecast_no_p95"
+                  value: "lstm_forecast_no_roll"
 
                 # Optional: log per-service test MAE RPS
                 - name: LOG_TEST_PER_SERVICE
                   value: "true"
 
               volumeMounts:
-                - name: train-lstm-script-no-p95
+                - name: train-lstm-script-no-roll
                   mountPath: /app
                   readOnly: true
 
           volumes:
-            - name: train-lstm-script-no-p95
+            - name: train-lstm-script-no-roll
               configMap:
-                name: train-lstm-script-no-p95
+                name: train-lstm-script-no-roll
