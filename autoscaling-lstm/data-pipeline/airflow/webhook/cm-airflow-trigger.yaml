@@ -7,13 +7,18 @@ data:
   app.py: |
     import os
     import time
-    import requests
+    import hashlib
+    from datetime import datetime, timezone
     from urllib.parse import unquote_plus
+
+    import requests
     from fastapi import FastAPI, Request, HTTPException
 
     AIRFLOW_BASE = os.getenv("AIRFLOW_BASE", "http://airflow-api-server.airflow.svc.cluster.local:8080").rstrip("/")
     DAG_ID = os.getenv("DAG_ID", "drift_psi")
 
+    # basic: dùng username/password để lấy JWT qua /auth/token
+    # bearer: dùng AIRFLOW_TOKEN (JWT) có sẵn
     AIRFLOW_AUTH_MODE = os.getenv("AIRFLOW_AUTH_MODE", "basic").lower()
     AIRFLOW_TOKEN = os.getenv("AIRFLOW_TOKEN", "")
     AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "")
@@ -25,23 +30,58 @@ data:
 
     app = FastAPI()
 
-    def _airflow_headers():
-        h = {"Content-Type": "application/json"}
-        if AIRFLOW_AUTH_MODE == "bearer" and AIRFLOW_TOKEN:
-            h["Authorization"] = f"Bearer {AIRFLOW_TOKEN}"
-        return h
+    _token_cache = {"token": "", "exp_ts": 0.0}
 
-    def _airflow_auth():
-        if AIRFLOW_AUTH_MODE == "basic" and AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
-            return (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
-        return None
+    def _now_iso_utc() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _get_jwt_token() -> str:
+        if AIRFLOW_AUTH_MODE == "bearer" and AIRFLOW_TOKEN:
+            return AIRFLOW_TOKEN
+
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["exp_ts"]:
+            return _token_cache["token"]
+
+        if not (AIRFLOW_USERNAME and AIRFLOW_PASSWORD):
+            raise RuntimeError("Missing AIRFLOW_USERNAME/AIRFLOW_PASSWORD for auth/token")
+
+        r = requests.post(
+            f"{AIRFLOW_BASE}/auth/token",
+            json={"username": AIRFLOW_USERNAME, "password": AIRFLOW_PASSWORD},
+            timeout=10,
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Auth token failed: {r.status_code} {r.text}")
+
+        token = r.json().get("access_token") or ""
+        if not token:
+            raise RuntimeError("Auth token response missing access_token")
+
+        _token_cache["token"] = token
+        _token_cache["exp_ts"] = now + 50.0
+        return token
 
     def trigger_dag(bucket: str, object_key: str):
-        dag_run_id = f"minio__{object_key.replace('/','__')}__{int(time.time())}"
-        url = f"{AIRFLOW_BASE}/api/v1/dags/{DAG_ID}/dagRuns"
-        payload = {"dag_run_id": dag_run_id, "conf": {"bucket": bucket, "object_key": object_key}}
+        token = _get_jwt_token()
+        logical_date = _now_iso_utc()
 
-        r = requests.post(url, json=payload, headers=_airflow_headers(), auth=_airflow_auth(), timeout=10)
+        base = f"{bucket}:{object_key}:{logical_date}"
+        h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+        run_id = f"minio__{h}"
+
+        url = f"{AIRFLOW_BASE}/api/v2/dags/{DAG_ID}/dagRuns"
+        payload = {
+            "logical_date": logical_date,
+            "dag_run_id": run_id,
+            "conf": {"bucket": bucket, "object_key": object_key},
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
         if r.status_code >= 300:
             raise RuntimeError(f"Airflow trigger failed: {r.status_code} {r.text}")
         return r.json()

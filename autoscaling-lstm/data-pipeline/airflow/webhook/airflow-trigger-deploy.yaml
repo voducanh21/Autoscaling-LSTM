@@ -29,11 +29,9 @@ spec:
             - name: WATCH_SUFFIX
               value: ".parquet"
 
-            # BASIC auth (đúng với secret username/password)
+            # Auth: dùng username/password để lấy JWT qua /auth/token
             - name: AIRFLOW_AUTH_MODE
               value: "basic"
-
-            # Nếu dùng Basic auth: tạo Secret tên "airflow-trigger-secret" trong namespace airflow
             - name: AIRFLOW_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -45,7 +43,9 @@ spec:
                   name: airflow-trigger-secret
                   key: AIRFLOW_PASSWORD
 
-            # Nếu dùng Bearer token thì uncomment 2 dòng dưới và đổi AIRFLOW_AUTH_MODE=bearer
+            # Nếu bạn muốn dùng JWT cố định, đổi AIRFLOW_AUTH_MODE=bearer và set AIRFLOW_TOKEN
+            # - name: AIRFLOW_AUTH_MODE
+            #   value: "bearer"
             # - name: AIRFLOW_TOKEN
             #   valueFrom:
             #     secretKeyRef:
@@ -76,7 +76,6 @@ spec:
       volumes:
         - name: app-code
           configMap:
-            # ConfigMap (cm-...) trong namespace airflow
             name: airflow-trigger-script
 ---
 apiVersion: v1
