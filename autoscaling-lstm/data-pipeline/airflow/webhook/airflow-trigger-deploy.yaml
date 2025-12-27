@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-trigger-webhook
+  namespace: airflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-trigger-webhook
+  template:
+    metadata:
+      labels:
+        app: airflow-trigger-webhook
+    spec:
+      containers:
+        - name: webhook
+          image: ducanhvo/airflow-trigger:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AIRFLOW_BASE
+              value: "http://airflow-api-server.airflow.svc.cluster.local:8080"
+            - name: DAG_ID
+              value: "drift_psi"
+            - name: WATCH_PREFIX
+              value: "drift/current/metrics/"
+            - name: WATCH_SUFFIX
+              value: ".parquet"
+
+            # BASIC auth (đúng với secret username/password)
+            - name: AIRFLOW_AUTH_MODE
+              value: "basic"
+
+            # Nếu dùng Basic auth: tạo Secret tên "airflow-trigger-secret" trong namespace airflow
+            - name: AIRFLOW_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-trigger-secret
+                  key: AIRFLOW_USERNAME
+            - name: AIRFLOW_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-trigger-secret
+                  key: AIRFLOW_PASSWORD
+
+            # Nếu dùng Bearer token thì uncomment 2 dòng dưới và đổi AIRFLOW_AUTH_MODE=bearer
+            # - name: AIRFLOW_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: airflow-trigger-secret
+            #       key: AIRFLOW_TOKEN
+
+            - name: REQUIRE_OBJECT_CREATED
+              value: "true"
+
+          volumeMounts:
+            - name: app-code
+              mountPath: /app/app.py
+              subPath: app.py
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+      volumes:
+        - name: app-code
+          configMap:
+            # ConfigMap (cm-...) trong namespace airflow
+            name: airflow-trigger-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-trigger-webhook
+  namespace: airflow
+spec:
+  selector:
+    app: airflow-trigger-webhook
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

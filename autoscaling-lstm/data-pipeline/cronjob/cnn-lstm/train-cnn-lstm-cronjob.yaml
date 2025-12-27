@@ -1,0 +1,179 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: train-cnn-lstm-cronjob
+  namespace: cronjob
+spec:
+  schedule: "0 */6 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+          serviceAccountName: register-model-sa
+
+          containers:
+            - name: train-cnn-lstm
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[INFO] Start training CNN+LSTM..."
+                  python /app/train/train_cnn_lstm.py
+                  echo "[INFO] Training done. Running register..."
+                  set +e
+                  python /app/register/register_model.py
+                  rc=$?
+                  set -e
+                  if [ "$rc" -eq 10 ]; then
+                    echo "[INFO] Promoted to Production -> saving drift reference..."
+                    python /app/drift/save_reference.py
+                    echo "[INFO] Drift reference saved."
+                  elif [ "$rc" -eq 0 ]; then
+                    echo "[INFO] Not promoted -> skip saving drift reference."
+                  else
+                    echo "[ERROR] Register failed with code=$rc"
+                    exit "$rc"
+                  fi
+                  echo "[INFO] Job done."
+
+              env:
+                # --- S3 / MinIO ---
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_S3_ENDPOINT_URL
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_ARTIFACT_ROOT
+                  value: "s3://datalake/mlflow"
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: "s3://datalake/mlflow"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                # --- MLflow ---
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+
+                # --- Training Params ---
+                - name: WINDOW_SIZE
+                  value: "10"
+                - name: EPOCHS
+                  value: "20"
+                - name: BATCH_SIZE
+                  value: "128"
+                - name: HORIZON_MINUTES
+                  value: "5"
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
+                # --- Split 80/10/10 ---
+                - name: TRAIN_FRAC
+                  value: "0.80"
+                - name: VAL_FRAC
+                  value: "0.10"
+                - name: EXTRA_EMBARGO_MINUTES
+                  value: "0"
+
+                # --- FULL DATA MODE ---
+                - name: DATE_FRACTION
+                  value: "1.0"
+                - name: DATE_PICK_MODE
+                  value: "all"
+                - name: DATE_SEED
+                  value: "42"
+
+                # --- Reference output (only runs if promoted) ---
+                - name: REF_PREFIX
+                  value: "drift/reference"
+                - name: SAVE_LATEST_POINTER
+                  value: "true"
+                - name: REF_PER_SERVICE
+                  value: "true"
+                - name: REF_MAX_ROWS_PER_SERVICE
+                  value: "200000"
+
+                # --- Model / Experiment (must match training + register) ---
+                - name: MODEL_NAME
+                  value: "cnn_lstm_forecast"
+                - name: EXPERIMENT_NAME
+                  value: "cnn_lstm_forecast"
+
+                # --- Register behavior: compare vs current Production ---
+                - name: COMPARE_WITH_PRODUCTION
+                  value: "true"
+                - name: TARGET_STAGE
+                  value: "Production"
+                - name: ARCHIVE_OLD
+                  value: "true"
+                - name: MIN_IMPROVE_WAPE
+                  value: "0.0"
+                - name: MIN_IMPROVE_P95
+                  value: "0.0"
+                - name: MIN_IMPROVE_UNDER
+                  value: "0.0"
+                - name: PROMOTED_EXIT_CODE
+                  value: "10"
+
+                # --- Patch serving (match your serving CM + key) ---
+                - name: K8S_ENABLE
+                  value: "true"
+                - name: K8S_NAMESPACE
+                  value: "model"
+                - name: SERVING_CONFIGMAP
+                  value: "lstm-config"
+                - name: CONFIG_KEY_MODEL_URI
+                  value: "MODEL_URI"
+                - name: RESTART_DEPLOYMENTS
+                  value: "lstm-serving"
+
+                # --- MINIO credentials ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+              volumeMounts:
+                - name: train-cnn-lstm-script
+                  mountPath: /app/train
+                  readOnly: true
+                - name: register-model-script
+                  mountPath: /app/register
+                  readOnly: true
+                - name: drift-reference-script
+                  mountPath: /app/drift
+                  readOnly: true
+
+          volumes:
+            - name: train-cnn-lstm-script
+              configMap:
+                name: train-cnn-lstm-script
+                items:
+                  - key: train_cnn_lstm.py
+                    path: train_cnn_lstm.py
+            - name: register-model-script
+              configMap:
+                name: register-model-script
+                items:
+                  - key: register_model.py
+                    path: register_model.py
+            - name: drift-reference-script
+              configMap:
+                name: drift-reference-script
+                items:
+                  - key: save_reference.py
+                    path: save_reference.py

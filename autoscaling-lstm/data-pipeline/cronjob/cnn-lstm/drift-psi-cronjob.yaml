@@ -1,0 +1,90 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drift-psi-cronjob
+  namespace: cronjob
+spec:
+  schedule: "0 */6 * * *"   # mỗi 6 tiếng (đổi tùy bạn)
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+          containers:
+            - name: drift-psi
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  echo "[INFO] Start PSI job..."
+                  python /app/compute_psi.py
+                  echo "[INFO] PSI job done."
+              env:
+                # --- S3 / MinIO ---
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                # --- Paths ---
+                - name: MODEL_NAME
+                  value: "cnn_lstm_forecast"
+                - name: REF_PREFIX
+                  value: "drift/reference"
+                - name: CURRENT_PREFIX
+                  value: "drift/current/metrics"
+                - name: PSI_PREFIX
+                  value: "drift/psi"
+
+                # --- Current selection ---
+                - name: CURRENT_DAYS
+                  value: "7"
+                - name: CURRENT_PICK_MODE
+                  value: "last"
+                - name: CURRENT_SEED
+                  value: "42"
+
+                # --- PSI knobs ---
+                - name: PSI_BINS
+                  value: "10"
+                - name: PSI_EPS
+                  value: "0.000001"
+                - name: MAX_SAMPLES_PER_SERVICE
+                  value: "200000"
+
+                # --- Optional gating ---
+                # - name: PSI_THRESHOLD
+                #   value: "0.2"
+
+                # --- Timezone ---
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
+                # --- MINIO credentials ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+              volumeMounts:
+                - name: drift-psi-script
+                  mountPath: /app
+                  readOnly: true
+
+          volumes:
+            - name: drift-psi-script
+              configMap:
+                name: drift-psi-script

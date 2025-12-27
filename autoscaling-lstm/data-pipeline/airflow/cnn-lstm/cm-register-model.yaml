@@ -1,0 +1,339 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: register-model-script
+  namespace: cronjob
+data:
+  register_model.py: |
+    import os
+    import sys
+    import json
+    import math
+    from datetime import datetime, timezone
+    from typing import Optional, Dict, Tuple
+
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    # ============================================================
+    # ENV
+    # ============================================================
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "").strip()
+    if not MLFLOW_TRACKING_URI:
+        print("[ERROR] MLFLOW_TRACKING_URI is required", file=sys.stderr)
+        sys.exit(1)
+
+    MODEL_NAME = os.getenv("MODEL_NAME", "cnn_lstm_forecast").strip()
+    EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME).strip()
+
+    TARGET_STAGE = os.getenv("TARGET_STAGE", "Production").strip() or "Production"
+    ARCHIVE_OLD = os.getenv("ARCHIVE_OLD", "true").lower() == "true"
+
+    # Compare: candidate(latest run) vs current Production (champion). If no Production -> promote candidate.
+    COMPARE_WITH_PRODUCTION = os.getenv("COMPARE_WITH_PRODUCTION", "true").lower() == "true"
+
+    # Require all 3 to DECREASE by at least these deltas (0.0 = strictly smaller)
+    MIN_IMPROVE_WAPE = float(os.getenv("MIN_IMPROVE_WAPE", "0.0"))
+    MIN_IMPROVE_P95 = float(os.getenv("MIN_IMPROVE_P95", "0.0"))
+    MIN_IMPROVE_UNDER = float(os.getenv("MIN_IMPROVE_UNDER", "0.0"))
+
+    # Metrics keys (must exist in training run)
+    MET_TEST_WAPE_RPS = os.getenv("MET_TEST_WAPE_RPS", "test_wape_rps")
+    MET_TEST_P95_ABS_ERR_RPS = os.getenv("MET_TEST_P95_ABS_ERR_RPS", "test_p95_abs_err_rps")
+    MET_TEST_UNDER_RATE_RPS = os.getenv("MET_TEST_UNDER_RATE_RPS", "test_under_rate_rps")
+
+    # Exit code when promoted so shell can run save_reference only on promotion
+    PROMOTED_EXIT_CODE = int(os.getenv("PROMOTED_EXIT_CODE", "10"))
+
+    # K8s patch/restart
+    K8S_ENABLE = os.getenv("K8S_ENABLE", "true").lower() == "true"
+    K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "model").strip() or "model"
+    SERVING_CONFIGMAP = os.getenv("SERVING_CONFIGMAP", "lstm-config").strip() or "lstm-config"
+    CONFIG_KEY_MODEL_URI = os.getenv("CONFIG_KEY_MODEL_URI", "MODEL_URI").strip() or "MODEL_URI"
+    RESTART_DEPLOYMENTS = [x.strip() for x in os.getenv("RESTART_DEPLOYMENTS", "lstm-serving").split(",") if x.strip()]
+
+    # ============================================================
+    # MLflow hardening
+    # ============================================================
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR", "0")
+    try:
+        if hasattr(mlflow, "config") and hasattr(mlflow.config, "enable_async_logging"):
+            mlflow.config.enable_async_logging(False)
+    except Exception:
+        pass
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = MlflowClient()
+
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _to_float(x) -> Optional[float]:
+        try:
+            if x is None:
+                return None
+            v = float(x)
+            if math.isnan(v) or math.isinf(v):
+                return None
+            return v
+        except Exception:
+            return None
+
+    def _pick_latest_run_with_metrics(exp_id: str) -> Tuple[Optional[str], Optional[Dict[str, float]], Optional[str]]:
+        runs = mlflow.search_runs(
+            experiment_ids=[exp_id],
+            order_by=["attributes.start_time DESC"],
+            max_results=50,
+        )
+        if runs is None or len(runs) == 0:
+            return None, None, "No runs found"
+
+        for _, r in runs.iterrows():
+            run_id = r.get("run_id") or r.get("run_uuid")
+            if not run_id:
+                continue
+
+            wape = _to_float(r.get(f"metrics.{MET_TEST_WAPE_RPS}"))
+            p95 = _to_float(r.get(f"metrics.{MET_TEST_P95_ABS_ERR_RPS}"))
+            under = _to_float(r.get(f"metrics.{MET_TEST_UNDER_RATE_RPS}"))
+
+            if wape is None or p95 is None or under is None:
+                continue
+
+            met = {
+                "test_wape_rps": wape,
+                "test_p95_abs_err_rps": p95,
+                "test_under_rate_rps": under,
+            }
+            return run_id, met, None
+
+        return None, None, f"No recent run has all required metrics: {MET_TEST_WAPE_RPS}, {MET_TEST_P95_ABS_ERR_RPS}, {MET_TEST_UNDER_RATE_RPS}"
+
+    def _get_production_run_id() -> Optional[str]:
+        # Prefer explicit stage
+        try:
+            vers = client.get_latest_versions(MODEL_NAME, stages=[TARGET_STAGE])
+            if vers:
+                return getattr(vers[0], "run_id", None)
+        except Exception:
+            pass
+
+        # Fallback scan
+        try:
+            vers = client.get_latest_versions(MODEL_NAME)
+            for v in vers or []:
+                if getattr(v, "current_stage", None) == TARGET_STAGE:
+                    return getattr(v, "run_id", None)
+        except Exception:
+            pass
+
+        return None
+
+    def _get_run_metrics(run_id: str) -> Dict[str, Optional[float]]:
+        r = client.get_run(run_id)
+        m = r.data.metrics or {}
+        return {
+            "test_wape_rps": _to_float(m.get(MET_TEST_WAPE_RPS)),
+            "test_p95_abs_err_rps": _to_float(m.get(MET_TEST_P95_ABS_ERR_RPS)),
+            "test_under_rate_rps": _to_float(m.get(MET_TEST_UNDER_RATE_RPS)),
+        }
+
+    def _all_three_decrease(cand: Dict[str, float], prod: Dict[str, Optional[float]]) -> Tuple[bool, str]:
+        cw, cp, cu = cand["test_wape_rps"], cand["test_p95_abs_err_rps"], cand["test_under_rate_rps"]
+        pw, pp, pu = prod.get("test_wape_rps"), prod.get("test_p95_abs_err_rps"), prod.get("test_under_rate_rps")
+
+        if pw is None or pp is None or pu is None:
+            return False, "Production is missing required metrics"
+
+        ok_w = cw <= (pw - MIN_IMPROVE_WAPE)
+        ok_p = cp <= (pp - MIN_IMPROVE_P95)
+        ok_u = cu <= (pu - MIN_IMPROVE_UNDER)
+
+        if ok_w and ok_p and ok_u:
+            return True, "OK"
+
+        return False, (
+            f"Not all decreased vs Production: "
+            f"wape cand={cw} prod={pw} need<=prod-{MIN_IMPROVE_WAPE}; "
+            f"p95 cand={cp} prod={pp} need<=prod-{MIN_IMPROVE_P95}; "
+            f"under cand={cu} prod={pu} need<=prod-{MIN_IMPROVE_UNDER}"
+        )
+
+    # ============================================================
+    # K8s helpers (in-cluster)
+    # ============================================================
+    def _k8s_request(method: str, path: str, body: Optional[dict] = None):
+        import requests
+
+        host = os.getenv("KUBERNETES_SERVICE_HOST")
+        port = os.getenv("KUBERNETES_SERVICE_PORT", "443")
+        if not host:
+            raise RuntimeError("Kubernetes in-cluster env not found (KUBERNETES_SERVICE_HOST)")
+
+        token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+        with open(token_path, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+
+        url = f"https://{host}:{port}{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+        if body is not None:
+            headers["Content-Type"] = "application/merge-patch+json"
+
+        r = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            verify=ca_path,
+            timeout=15,
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"K8S {method} {path} -> {r.status_code}: {r.text[:400]}")
+        if r.text:
+            return r.json()
+        return None
+
+    def patch_configmap(namespace: str, name: str, data_patch: dict):
+        path = f"/api/v1/namespaces/{namespace}/configmaps/{name}"
+        body = {"data": data_patch}
+        _k8s_request("PATCH", path, body)
+
+    def restart_deployment(namespace: str, name: str):
+        path = f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
+        ts = _now_iso()
+        body = {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "kubectl.kubernetes.io/restartedAt": ts
+                        }
+                    }
+                }
+            }
+        }
+        _k8s_request("PATCH", path, body)
+
+    # ============================================================
+    # Registry helpers (first-time safe)
+    # ============================================================
+    def ensure_registered_model_exists(name: str):
+        try:
+            client.get_registered_model(name)
+            return
+        except Exception:
+            pass
+        try:
+            client.create_registered_model(name)
+            print(f"[INFO] Created registered model: {name}")
+        except Exception as e:
+            # Might be created concurrently; ignore if already exists
+            print(f"[WARN] create_registered_model ignored: {e}")
+
+    def create_model_version_for_run(name: str, run_id: str):
+        # Prefer runs:/ URI, fallback to artifact_uri/model
+        model_uri = f"runs:/{run_id}/model"
+        try:
+            mv = client.create_model_version(name=name, source=model_uri, run_id=run_id)
+            return mv, model_uri, "runs_uri"
+        except Exception as e1:
+            run = client.get_run(run_id)
+            artifact_uri = (run.info.artifact_uri or "").rstrip("/")
+            if not artifact_uri:
+                raise RuntimeError(f"Empty artifact_uri; runs_uri failed: {e1}")
+            source = f"{artifact_uri}/model"
+            mv = client.create_model_version(name=name, source=source, run_id=run_id)
+            return mv, source, "artifact_uri"
+
+    # ============================================================
+    # Main
+    # ============================================================
+    print(f"[INFO] Register start | model={MODEL_NAME} exp={EXPERIMENT_NAME} stage={TARGET_STAGE}")
+    exp = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
+    if exp is None:
+        print(f"[ERROR] Experiment not found: {EXPERIMENT_NAME}", file=sys.stderr)
+        sys.exit(1)
+
+    cand_run_id, cand_met, err = _pick_latest_run_with_metrics(exp.experiment_id)
+    if err:
+        print(f"[ERROR] {err}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[INFO] Candidate(latest) run={cand_run_id} metrics={cand_met}")
+
+    prod_run_id = None
+    prod_met = None
+    if COMPARE_WITH_PRODUCTION:
+        prod_run_id = _get_production_run_id()
+        if prod_run_id:
+            prod_met = _get_run_metrics(prod_run_id)
+            print(f"[INFO] Production(champion) run={prod_run_id} metrics={prod_met}")
+        else:
+            print("[INFO] No Production found -> promote candidate directly")
+
+    if prod_run_id and prod_met:
+        ok, reason = _all_three_decrease(cand_met, prod_met)
+        if not ok:
+            print(f"[INFO] Skip promotion: {reason}")
+            sys.exit(0)
+        print("[INFO] Candidate decreased all 3 vs Production -> promote")
+
+    # Create model version + promote
+    serving_uri = f"runs:/{cand_run_id}/model"
+    chosen_version = None
+    registry_ok = False
+    promoted = False
+
+    try:
+        ensure_registered_model_exists(MODEL_NAME)
+        mv, used_source, used_mode = create_model_version_for_run(MODEL_NAME, cand_run_id)
+        chosen_version = getattr(mv, "version", None)
+        print(f"[INFO] ModelVersion created | name={MODEL_NAME} version={chosen_version} source={used_source} mode={used_mode}")
+
+        if chosen_version is not None:
+            client.transition_model_version_stage(
+                name=MODEL_NAME,
+                version=str(chosen_version),
+                stage=TARGET_STAGE,
+                archive_existing_versions=ARCHIVE_OLD,
+            )
+            serving_uri = f"models:/{MODEL_NAME}/{TARGET_STAGE}"
+            registry_ok = True
+            promoted = True
+            print(f"[INFO] Promoted | name={MODEL_NAME} version={chosen_version} stage={TARGET_STAGE}")
+    except Exception as e:
+        print(f"[WARN] Registry promotion failed, fallback to runs URI. err={e}")
+
+    # Patch serving ConfigMap + restart
+    if K8S_ENABLE:
+        try:
+            patch = {
+                "MODEL_NAME": MODEL_NAME,
+                "MODEL_STAGE": TARGET_STAGE if registry_ok else "RUNS",
+                "MODEL_VERSION": str(chosen_version) if chosen_version is not None else "",
+                "RUN_ID": cand_run_id,
+                "UPDATED_AT": _now_iso(),
+                CONFIG_KEY_MODEL_URI: serving_uri,
+            }
+            patch_configmap(K8S_NAMESPACE, SERVING_CONFIGMAP, patch)
+            print(f"[INFO] Patched ConfigMap {K8S_NAMESPACE}/{SERVING_CONFIGMAP} -> {CONFIG_KEY_MODEL_URI}={serving_uri}")
+
+            for dep in RESTART_DEPLOYMENTS:
+                restart_deployment(K8S_NAMESPACE, dep)
+                print(f"[INFO] Restarted Deployment {K8S_NAMESPACE}/{dep}")
+        except Exception as e:
+            print(f"[ERROR] K8S patch/restart failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"[DONE] register | model={MODEL_NAME} uri={serving_uri} registry_ok={registry_ok} run_id={cand_run_id}")
+
+    # If promoted -> special exit code so CronJob can run save_reference.py
+    if promoted:
+        sys.exit(PROMOTED_EXIT_CODE)
+    sys.exit(0)

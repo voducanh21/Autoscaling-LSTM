@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-trigger-script
+  namespace: airflow
+data:
+  app.py: |
+    import os
+    import time
+    import requests
+    from urllib.parse import unquote_plus
+    from fastapi import FastAPI, Request, HTTPException
+
+    AIRFLOW_BASE = os.getenv("AIRFLOW_BASE", "http://airflow-api-server.airflow.svc.cluster.local:8080").rstrip("/")
+    DAG_ID = os.getenv("DAG_ID", "drift_psi")
+
+    AIRFLOW_AUTH_MODE = os.getenv("AIRFLOW_AUTH_MODE", "basic").lower()
+    AIRFLOW_TOKEN = os.getenv("AIRFLOW_TOKEN", "")
+    AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "")
+    AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "")
+
+    PREFIX = os.getenv("WATCH_PREFIX", "drift/current/metrics/")
+    SUFFIX = os.getenv("WATCH_SUFFIX", ".parquet")
+    REQUIRE_OBJECT_CREATED = os.getenv("REQUIRE_OBJECT_CREATED", "true").lower() == "true"
+
+    app = FastAPI()
+
+    def _airflow_headers():
+        h = {"Content-Type": "application/json"}
+        if AIRFLOW_AUTH_MODE == "bearer" and AIRFLOW_TOKEN:
+            h["Authorization"] = f"Bearer {AIRFLOW_TOKEN}"
+        return h
+
+    def _airflow_auth():
+        if AIRFLOW_AUTH_MODE == "basic" and AIRFLOW_USERNAME and AIRFLOW_PASSWORD:
+            return (AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
+        return None
+
+    def trigger_dag(bucket: str, object_key: str):
+        dag_run_id = f"minio__{object_key.replace('/','__')}__{int(time.time())}"
+        url = f"{AIRFLOW_BASE}/api/v1/dags/{DAG_ID}/dagRuns"
+        payload = {"dag_run_id": dag_run_id, "conf": {"bucket": bucket, "object_key": object_key}}
+
+        r = requests.post(url, json=payload, headers=_airflow_headers(), auth=_airflow_auth(), timeout=10)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Airflow trigger failed: {r.status_code} {r.text}")
+        return r.json()
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    @app.post("/minio")
+    async def minio_hook(req: Request):
+        body = await req.json()
+
+        records = body.get("Records") or body.get("records") or []
+        if not records:
+            raise HTTPException(400, "No Records in event")
+
+        runs = []
+        for rec in records:
+            if REQUIRE_OBJECT_CREATED:
+                evt = rec.get("eventName") or rec.get("event_name") or rec.get("EventName") or ""
+                if "ObjectCreated" not in evt:
+                    continue
+
+            s3 = rec.get("s3", {}) or {}
+            bucket = ((s3.get("bucket", {}) or {}).get("name")) or ""
+            obj = ((s3.get("object", {}) or {}).get("key")) or ""
+            if not bucket or not obj:
+                continue
+
+            obj = unquote_plus(obj)
+
+            if PREFIX and not obj.startswith(PREFIX):
+                continue
+            if SUFFIX and not obj.endswith(SUFFIX):
+                continue
+
+            runs.append(trigger_dag(bucket, obj))
+
+        return {"ok": True, "triggered": len(runs), "runs": runs}

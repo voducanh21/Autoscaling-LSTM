@@ -1,0 +1,380 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drift-psi-script
+  namespace: cronjob
+data:
+  compute_psi.py: |
+    import os, sys, math, json, hashlib
+    import numpy as np
+    import pandas as pd
+    import pyarrow.parquet as pq
+    import s3fs
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    # Evidently (image đã có) - chỉ log version, không bắt buộc dùng
+    try:
+        import evidently
+        EVIDENTLY_VERSION = getattr(evidently, "__version__", "unknown")
+    except Exception:
+        EVIDENTLY_VERSION = None
+
+    # =========================================================
+    # PSI helpers
+    # =========================================================
+    def psi_from_bins(ref_vals: np.ndarray, cur_vals: np.ndarray, bins: np.ndarray, eps: float = 1e-6) -> float:
+        """
+        PSI = sum((p_i - q_i) * ln(p_i/q_i))
+        bins: edges length = n_bins+1 (strictly increasing, includes -inf/+inf)
+        """
+        ref_vals = np.asarray(ref_vals, dtype=np.float64)
+        cur_vals = np.asarray(cur_vals, dtype=np.float64)
+        bins = np.asarray(bins, dtype=np.float64)
+        
+        ref_vals = ref_vals[np.isfinite(ref_vals)]
+        cur_vals = cur_vals[np.isfinite(cur_vals)]
+        if ref_vals.size == 0 or cur_vals.size == 0:
+            return float("nan")
+        
+        ref_hist, _ = np.histogram(ref_vals, bins=bins)
+        cur_hist, _ = np.histogram(cur_vals, bins=bins)
+        
+        ref_pct = ref_hist / max(1, ref_vals.size)
+        cur_pct = cur_hist / max(1, cur_vals.size)
+        
+        ref_pct = np.clip(ref_pct, eps, 1.0)
+        cur_pct = np.clip(cur_pct, eps, 1.0)
+        
+        return float(np.sum((ref_pct - cur_pct) * np.log(ref_pct / cur_pct)))
+
+    def quantile_bins(x: np.ndarray, n_bins: int) -> np.ndarray:
+        """
+        Bin edges from reference quantiles:
+          [-inf, q1, q2, ... , +inf]
+        If degenerate, fallback to linspace(lo,hi).
+        """
+        x = np.asarray(x, dtype=np.float64)
+        x = x[np.isfinite(x)]
+        if x.size < max(50, n_bins * 5):
+            n_bins = max(5, min(n_bins, 10))
+        if x.size == 0:
+            return np.array([-np.inf, np.inf], dtype=np.float64)
+        
+        qs = np.linspace(0.0, 1.0, n_bins + 1)
+        edges = np.quantile(x, qs)
+        edges = np.unique(edges)
+        
+        if edges.size < 3:
+            lo = float(np.min(x))
+            hi = float(np.max(x))
+            if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+                return np.array([-np.inf, np.inf], dtype=np.float64)
+            edges = np.linspace(lo, hi, n_bins + 1)
+        
+        edges = edges.astype(np.float64)
+        edges[0] = -np.inf
+        edges[-1] = np.inf
+        return edges
+
+    def md5_list(items):
+        s = "|".join(map(str, items))
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+    # =========================================================
+    # ENV
+    # =========================================================
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+    BUCKET = os.getenv("S3_BUCKET", "datalake")
+
+    TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
+    try:
+        TZ = ZoneInfo(TZ_NAME)
+    except Exception:
+        TZ = timezone.utc
+
+    FORCE_HTTP = os.getenv("AWS_STORAGE_FORCE_HTTP", "false").lower() == "true"
+    client_args = {"endpoint_url": S3_ENDPOINT}
+    if FORCE_HTTP:
+        client_args["verify"] = False
+
+    MODEL_NAME = os.getenv("MODEL_NAME", "cnn_lstm_forecast")
+
+    # Reference (created by save_reference.py)
+    REF_PREFIX = os.getenv("REF_PREFIX", "drift/reference")
+    REF_TAG = os.getenv("REF_TAG", "").strip()  # optional; empty -> latest.json
+    READ_REF_PER_SERVICE = os.getenv("READ_REF_PER_SERVICE", "false").lower() == "true"
+
+    # Current
+    CURRENT_PREFIX = os.getenv("CURRENT_PREFIX", "drift/current/metrics")
+
+    # PSI config
+    FEATURES = ["rps_1m_log1p", "cpu_norm", "mem_norm"]
+    N_BINS = int(os.getenv("PSI_BINS", "10"))
+    EPS = float(os.getenv("PSI_EPS", "1e-6"))
+    MAX_SAMPLES_PER_SERVICE = int(os.getenv("MAX_SAMPLES_PER_SERVICE", "200000"))
+
+    # Current date selection
+    CURRENT_DAYS = int(os.getenv("CURRENT_DAYS", "7"))  # last N partitions
+    CURRENT_DATE_FRACTION = float(os.getenv("CURRENT_DATE_FRACTION", "0.0"))  # 0 => disabled
+    CURRENT_PICK_MODE = os.getenv("CURRENT_PICK_MODE", "last").lower()  # last|first|hash
+    CURRENT_SEED = int(os.getenv("CURRENT_SEED", "42"))
+
+    # Output
+    PSI_PREFIX = os.getenv("PSI_PREFIX", "drift/psi")
+    RUN_TAG = os.getenv("RUN_TAG", "").strip() or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    SAVE_LATEST_POINTER = os.getenv("SAVE_LATEST_POINTER", "true").lower() == "true"
+
+    PSI_THRESHOLD = os.getenv("PSI_THRESHOLD", "").strip()
+    PSI_THRESHOLD = float(PSI_THRESHOLD) if PSI_THRESHOLD else None
+
+    # Services must match train/reference
+    FIXED_ORDER = ["api-gateway", "authentication-service", "order-service", "payment-service", "product-service"]
+    SERVICE_TO_ID = {svc: i for i, svc in enumerate(FIXED_ORDER)}
+
+    # =========================================================
+    # S3 init + IO helpers
+    # =========================================================
+    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
+
+    def s3_read_json(key: str) -> dict:
+        with fs.open(f"{BUCKET}/{key}", "rb") as f:
+            return json.loads(f.read().decode("utf-8"))
+
+    def s3_read_parquet_df(key: str, columns=None) -> pd.DataFrame:
+        with fs.open(f"{BUCKET}/{key}", "rb") as f:
+            return pq.read_table(f, columns=columns).to_pandas()
+
+    # =========================================================
+    # Load reference meta + reference data
+    # =========================================================
+    if REF_TAG:
+        ref_base = f"{REF_PREFIX}/model={MODEL_NAME}/tag={REF_TAG}"
+        meta_key = f"{ref_base}/meta.json"
+        meta = s3_read_json(meta_key)
+    else:
+        latest_key = f"{REF_PREFIX}/model={MODEL_NAME}/latest.json"
+        meta = s3_read_json(latest_key)
+
+    # Compatible with both old/new meta:
+    # - new meta: combined_ref_s3_key / per_service_ref_s3_keys
+    # - old meta: ref_s3_key
+    per_service_keys = meta.get("per_service_ref_s3_keys") or {}
+    combined_key = meta.get("combined_ref_s3_key") or meta.get("ref_s3_key")
+
+    if READ_REF_PER_SERVICE and per_service_keys:
+        ref_by_service = {}
+        for svc in FIXED_ORDER:
+            k = per_service_keys.get(svc)
+            if not k:
+                continue
+            df_ref = s3_read_parquet_df(k, columns=["service", "service_id"] + FEATURES)
+            df_ref = df_ref.dropna(subset=["service"] + FEATURES).copy()
+            ref_by_service[svc] = df_ref
+        if not ref_by_service:
+            print("[ERROR] READ_REF_PER_SERVICE=true but cannot load any per-service reference parquet.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[INFO] Reference | mode=per_service loaded={len(ref_by_service)}/{len(FIXED_ORDER)} ref_tag={meta.get('ref_tag')}")
+    else:
+        if not combined_key:
+            print("[ERROR] Reference meta missing combined_ref_s3_key/ref_s3_key.", file=sys.stderr)
+            sys.exit(1)
+        ref_df = s3_read_parquet_df(combined_key, columns=["service", "service_id"] + FEATURES)
+        ref_df = ref_df.dropna(subset=["service"] + FEATURES).copy()
+        print(f"[INFO] Reference | mode=combined key=s3://{BUCKET}/{combined_key} ref_tag={meta.get('ref_tag')} rows={len(ref_df)}")
+
+    # =========================================================
+    # Load current parquet(s)
+    # Layout: s3://datalake/drift/current/metrics/date=.../service=.../*.parquet
+    # =========================================================
+    cur_prefix = f"{BUCKET}/{CURRENT_PREFIX}/"
+    paths = fs.glob(cur_prefix + "date=*/service=*/*.parquet")
+    if not paths:
+        print(f"[ERROR] No current parquet under s3://{BUCKET}/{CURRENT_PREFIX}/date=*/service=*/*.parquet", file=sys.stderr)
+        sys.exit(1)
+
+    # parse dates
+    all_dates = set()
+    for p in paths:
+        try:
+            d = p.split("/date=")[1].split("/")[0]
+            all_dates.add(d)
+        except Exception:
+            pass
+    dates_sorted = sorted(all_dates)
+    if not dates_sorted:
+        print("[ERROR] Cannot parse current date partitions.", file=sys.stderr)
+        sys.exit(1)
+
+    # pick dates
+    picked_dates = dates_sorted
+    if CURRENT_DATE_FRACTION and 0.0 < CURRENT_DATE_FRACTION < 1.0:
+        k = max(1, int(math.ceil(len(dates_sorted) * CURRENT_DATE_FRACTION)))
+        if CURRENT_PICK_MODE == "first":
+            picked_dates = dates_sorted[:k]
+        elif CURRENT_PICK_MODE == "hash":
+            rng = np.random.default_rng(CURRENT_SEED)
+            idx = np.sort(rng.choice(len(dates_sorted), size=k, replace=False))
+            picked_dates = sorted([dates_sorted[i] for i in idx])
+        else:
+            picked_dates = dates_sorted[-k:]
+    else:
+        if CURRENT_DAYS > 0:
+            picked_dates = dates_sorted[-min(CURRENT_DAYS, len(dates_sorted)):]
+
+    picked_set = set(picked_dates)
+    picked_hash = md5_list(picked_dates)
+    print(f"[INFO] Current pick | dates={len(picked_dates)} start={picked_dates[0]} end={picked_dates[-1]} mode={CURRENT_PICK_MODE} days={CURRENT_DAYS} hash={picked_hash}")
+
+    # read current rows
+    cur_need_cols = ["rps_1m", "cpu_norm", "mem_norm"]
+    cur_frames = []
+
+    for p in paths:
+        try:
+            date_part = p.split("/date=")[1].split("/")[0]
+            if date_part not in picked_set:
+                continue
+            svc = p.split("/service=")[1].split("/")[0]
+            if svc not in SERVICE_TO_ID:
+                continue
+            with fs.open(p, "rb") as f:
+                dfp = pq.read_table(f, columns=cur_need_cols).to_pandas()
+            dfp["service"] = svc
+            dfp["service_id"] = int(SERVICE_TO_ID[svc])
+            dfp["date_part"] = date_part
+            cur_frames.append(dfp)
+        except Exception:
+            continue
+
+    if not cur_frames:
+        print("[ERROR] No current rows after filtering by picked dates/services.", file=sys.stderr)
+        sys.exit(1)
+
+    cur_df = pd.concat(cur_frames, ignore_index=True)
+    cur_df = cur_df.dropna(subset=["service"] + cur_need_cols).copy()
+
+    # build PSI features for current
+    rps = np.clip(cur_df["rps_1m"].astype(float).values, 0.0, None)
+    cur_df["rps_1m_log1p"] = np.log1p(rps).astype(np.float32)
+    cur_df["cpu_norm"] = cur_df["cpu_norm"].astype(np.float32)
+    cur_df["mem_norm"] = cur_df["mem_norm"].astype(np.float32)
+
+    # =========================================================
+    # Compute PSI per-service, per-feature
+    # Aggregate = mean across services (service counts assumed equal; vẫn sample về cùng N để chắc chắn)
+    # =========================================================
+    results = {
+        "model_name": MODEL_NAME,
+        "run_tag": RUN_TAG,
+        "created_at_utc": datetime.utcnow().isoformat() + "Z",
+        "evidently_version": EVIDENTLY_VERSION,
+        "reference": {
+            "ref_tag": meta.get("ref_tag"),
+            "combined_ref_s3_key": combined_key,
+            "per_service_ref_s3_keys": per_service_keys,
+            "picked_dates_start": meta.get("picked_dates_start"),
+            "picked_dates_end": meta.get("picked_dates_end"),
+            "picked_dates_count": meta.get("picked_dates_count"),
+            "picked_dates_hash": meta.get("picked_dates_hash"),
+        },
+        "current": {
+            "prefix": CURRENT_PREFIX,
+            "picked_dates_start": picked_dates[0],
+            "picked_dates_end": picked_dates[-1],
+            "picked_dates_count": len(picked_dates),
+            "picked_dates_hash": picked_hash,
+        },
+        "features": FEATURES,
+        "psi_bins": N_BINS,
+        "psi_eps": EPS,
+        "max_samples_per_service": MAX_SAMPLES_PER_SERVICE,
+        "read_ref_per_service": READ_REF_PER_SERVICE,
+        "per_service": {},
+        "aggregate": {}
+    }
+
+    agg_by_feat = {f: [] for f in FEATURES}
+    agg_overall = []
+
+    for svc in FIXED_ORDER:
+        if READ_REF_PER_SERVICE and per_service_keys:
+            ref_s = (ref_by_service.get(svc) if 'ref_by_service' in globals() else pd.DataFrame())
+        else:
+            ref_s = ref_df[ref_df["service"] == svc]
+        
+        cur_s = cur_df[cur_df["service"] == svc]
+        
+        if ref_s is None or ref_s.empty or cur_s.empty:
+            results["per_service"][svc] = {"error": "missing_ref_or_current", "ref_rows": int(0 if ref_s is None else len(ref_s)), "cur_rows": int(len(cur_s))}
+            continue
+        
+        n_ref = int(len(ref_s))
+        n_cur = int(len(cur_s))
+        n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
+        if n <= 0:
+            results["per_service"][svc] = {"error": "no_rows_after_sampling", "ref_rows": n_ref, "cur_rows": n_cur}
+            continue
+        
+        # sample both to same n
+        if n_ref > n:
+            ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
+        if n_cur > n:
+            cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
+        
+        svc_out = {"ref_rows_used": int(len(ref_s)), "cur_rows_used": int(len(cur_s)), "psi": {}}
+        svc_psi_vals = []
+        
+        for feat in FEATURES:
+            ref_vals = ref_s[feat].to_numpy(dtype=np.float64, copy=False)
+            cur_vals = cur_s[feat].to_numpy(dtype=np.float64, copy=False)
+            
+            bins = quantile_bins(ref_vals, N_BINS)
+            psi_v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
+            
+            svc_out["psi"][feat] = psi_v
+            if np.isfinite(psi_v):
+                agg_by_feat[feat].append(psi_v)
+                svc_psi_vals.append(psi_v)
+        
+        if svc_psi_vals:
+            svc_overall = float(np.mean(svc_psi_vals))
+            svc_out["psi_overall_mean3"] = svc_overall
+            agg_overall.append(svc_overall)
+        else:
+            svc_out["psi_overall_mean3"] = float("nan")
+        
+        results["per_service"][svc] = svc_out
+
+    results["aggregate"]["psi_mean_by_feature"] = {k: (float(np.mean(v)) if v else float("nan")) for k, v in agg_by_feat.items()}
+    results["aggregate"]["psi_overall_mean_services"] = float(np.mean(agg_overall)) if agg_overall else float("nan")
+
+    print("[INFO] PSI aggregate:", json.dumps(results["aggregate"], ensure_ascii=False))
+
+    # =========================================================
+    # Save to S3
+    # =========================================================
+    base_key = f"{PSI_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}"
+    out_key = f"{base_key}/psi.json"
+    latest_key = f"{PSI_PREFIX}/model={MODEL_NAME}/latest.json"
+
+    payload = json.dumps(results, ensure_ascii=False, indent=2).encode("utf-8")
+    with fs.open(f"{BUCKET}/{out_key}", "wb") as f:
+        f.write(payload)
+
+    if SAVE_LATEST_POINTER:
+        with fs.open(f"{BUCKET}/{latest_key}", "wb") as f:
+            f.write(payload)
+
+    print(f"[DONE] Saved PSI | s3://{BUCKET}/{out_key}")
+    if SAVE_LATEST_POINTER:
+        print(f"[DONE] Updated latest | s3://{BUCKET}/{latest_key}")
+
+    # Optional threshold gating (for retrain trigger)
+    if PSI_THRESHOLD is not None:
+        overall = results["aggregate"]["psi_overall_mean_services"]
+        if np.isfinite(overall) and overall >= PSI_THRESHOLD:
+            print(f"[ALERT] PSI overall {overall:.6f} >= threshold {PSI_THRESHOLD:.6f}", file=sys.stderr)
+            sys.exit(2)
