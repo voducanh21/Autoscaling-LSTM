@@ -22,12 +22,45 @@ spec:
               command: ["/bin/sh", "-c"]
               args:
                 - |
-                  set -e
+                  set -u
+                  set -o pipefail
+
                   echo "[INFO] Start training LSTM..."
                   python /app/train_lstm.py
-                  echo "[INFO] Training done. Running model registry..."
+                  train_rc=$?
+                  if [ "$train_rc" -ne 0 ]; then
+                    echo "[ERROR] Training failed rc=${train_rc}"
+                    exit "$train_rc"
+                  fi
+                  echo "[INFO] Training done."
+
+                  # Optional: unify tag for reference metadata
+                  TAG="$(date -u +%Y%m%dT%H%M%SZ)"
+                  export REF_TAG="${TAG}"
+
+                  echo "[INFO] Running model registry..."
                   python /register/register_model.py
-                  echo "[INFO] Registry done."
+                  reg_rc=$?
+                  echo "[INFO] Registry exit code=${reg_rc}"
+
+                  # PROMOTED_EXIT_CODE in register_model.py (default 10)
+                  if [ "$reg_rc" -eq 10 ]; then
+                    echo "[INFO] Model promoted -> saving drift reference (REF_TAG=${REF_TAG})..."
+                    python /reference/save_reference.py
+                    ref_rc=$?
+                    if [ "$ref_rc" -ne 0 ]; then
+                      echo "[ERROR] save_reference failed rc=${ref_rc}"
+                      exit "$ref_rc"
+                    fi
+                    echo "[INFO] Reference saved OK."
+                    exit 0
+                  elif [ "$reg_rc" -eq 0 ]; then
+                    echo "[INFO] Not promoted -> skip saving reference."
+                    exit 0
+                  else
+                    echo "[ERROR] Registry failed rc=${reg_rc}"
+                    exit "$reg_rc"
+                  fi
 
               env:
                 # --- S3 / MinIO ---
@@ -46,6 +79,10 @@ spec:
                 - name: AWS_S3_ADDRESSING_STYLE
                   value: "path"
 
+                # --- Timezone (match train/reference) ---
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
                 # --- MLflow ---
                 - name: MLFLOW_TRACKING_URI
                   value: "http://mlflow.mlflow.svc.cluster.local:5000"
@@ -57,6 +94,8 @@ spec:
                   value: "20"
                 - name: BATCH_SIZE
                   value: "128"
+                - name: HORIZON_MINUTES
+                  value: "5"
 
                 # --- Split 80/10/10 ---
                 - name: TRAIN_FRAC
@@ -92,13 +131,21 @@ spec:
                 - name: EXPERIMENT_NAME
                   value: "lstm_forecast"
 
-                # --- Promotion knobs (optional) ---
-                - name: REQUIRE_BOTH_RPS_AND_CPU
+                # --- register_model knobs ---
+                - name: PROMOTED_EXIT_CODE
+                  value: "10"
+
+                # --- save_reference knobs ---
+                - name: REF_PREFIX
+                  value: "drift/reference"
+                - name: REF_PER_SERVICE
                   value: "true"
-                - name: PROMOTION_EPS
-                  value: "0.0"
-                - name: REQUIRE_BEAT_BASELINE_TEST_WAPE
-                  value: "false"
+                - name: SAVE_COMBINED
+                  value: "true"
+                - name: SAVE_LATEST_POINTER
+                  value: "true"
+                - name: REF_MAX_ROWS_PER_SERVICE
+                  value: "200000"
 
               volumeMounts:
                 - name: train-lstm-script
@@ -106,6 +153,9 @@ spec:
                   readOnly: true
                 - name: register-model-script
                   mountPath: /register
+                  readOnly: true
+                - name: drift-reference-script
+                  mountPath: /reference
                   readOnly: true
 
           volumes:
@@ -115,3 +165,6 @@ spec:
             - name: register-model-script
               configMap:
                 name: register-model-script
+            - name: drift-reference-script
+              configMap:
+                name: drift-reference-script

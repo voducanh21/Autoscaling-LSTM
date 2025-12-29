@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: cnn-lstm-code
+  name: lstm-code
   namespace: model
 data:
   main.py: |
@@ -12,18 +12,16 @@ data:
     import numpy as np
     import traceback
 
-    app = FastAPI(title="CNN+LSTM Forecast Serving API")
+    app = FastAPI(title="LSTM Forecast Serving API")
 
     # ================= ENV =================
     MLFLOW_TRACKING_URI = os.getenv(
         "MLFLOW_TRACKING_URI",
         "http://mlflow.mlflow.svc.cluster.local:5000"
     )
+    MODEL_URI = os.getenv("MODEL_URI", "models:/lstm_forecast/Production")
 
-    # Default points to your CNN+LSTM registered model
-    MODEL_URI = os.getenv("MODEL_URI", "models:/cnn_lstm_forecast/Production")
-
-    # MUST match training input feature count (your train script uses 13 input_cols)
+    # MUST match training
     FEATURE_COUNT = int(os.getenv("FEATURE_COUNT", "13"))
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -63,13 +61,12 @@ data:
                 )
 
             preds = model.predict([X, S], verbose=0)
-            preds = np.asarray(preds, dtype=np.float32).reshape(-1).tolist()
+            preds = preds.reshape(-1).tolist()
 
-            # model output is [rps_future, cpu_future, mem_future]
             return {
-                "rps_future": float(preds[0]),
-                "cpu_future": float(preds[1]),
-                "mem_future": float(preds[2]),
+                "rps_future": preds[0],
+                "cpu_future": preds[1],
+                "mem_future": preds[2],
                 "predictions": preds
             }
 
@@ -80,24 +77,24 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cnn-lstm-serving
+  name: lstm-serving
   namespace: model
   labels:
-    app: cnn-lstm-serving
+    app: lstm-serving
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cnn-lstm-serving
+      app: lstm-serving
   template:
     metadata:
       labels:
-        app: cnn-lstm-serving
+        app: lstm-serving
     spec:
       nodeSelector:
         kubernetes.io/hostname: k3n-m03
       containers:
-        - name: cnn-lstm-serving
+        - name: lstm-serving
           image: ducanhvo/lstm-serving:latest
           imagePullPolicy: Always
           ports:
@@ -109,11 +106,8 @@ spec:
               value: "https://minio.voducanh.id.vn"
             - name: AWS_S3_ADDRESSING_STYLE
               value: "path"
-
-            # optional metadata
             - name: MODEL_NAME
-              value: "cnn_lstm_forecast"
-
+              value: "lstm_forecast"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -124,17 +118,11 @@ spec:
                 secretKeyRef:
                   name: minio-cred
                   key: AWS_SECRET_ACCESS_KEY
-
             - name: MODEL_URI
               valueFrom:
                 configMapKeyRef:
-                  name: cnn-lstm-config
+                  name: lstm-config
                   key: MODEL_URI
-
-            # must match training input feature count
-            - name: FEATURE_COUNT
-              value: "13"
-
           readinessProbe:
             httpGet:
               path: /
@@ -149,21 +137,21 @@ spec:
               cpu: "500m"
               memory: "512Mi"
           volumeMounts:
-            - name: cnn-lstm-code
+            - name: lstm-code
               mountPath: /app/main.py
               subPath: main.py
       volumes:
-        - name: cnn-lstm-code
+        - name: lstm-code
           configMap:
-            name: cnn-lstm-code
+            name: lstm-code
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: cnn-lstm-serving
+  name: lstm-serving
   namespace: model
   labels:
-    app: cnn-lstm-serving
+    app: lstm-serving
 spec:
   type: ClusterIP
   ports:
@@ -172,12 +160,12 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: cnn-lstm-serving
+    app: lstm-serving
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: cnn-lstm-config
+  name: lstm-config
   namespace: model
 data:
-  MODEL_URI: "models:/cnn_lstm_forecast/Production"
+  MODEL_URI: "models:/lstm_forecast/Production"

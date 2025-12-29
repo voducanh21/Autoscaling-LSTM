@@ -176,6 +176,8 @@ spec:
 
         # =====================================================
         # 5) SERVICE-LEVEL RESOURCE (pod -> job)
+        #    FIX: match pod name like:
+        #      <deploy>-<rsHash(8-10 base36)>-<podSuffix(5 base36)>
         # =====================================================
         - record: "svc:cpu_usage_rate_1m"
           expr: |
@@ -185,7 +187,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -197,7 +199,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -210,7 +212,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -222,7 +224,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -234,7 +236,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -246,7 +248,7 @@ spec:
                 "job",
                 "$1",
                 "pod",
-                "^(.*)-[0-9a-f]{9,10}-[0-9a-z]{5}$"
+                "^(.*)-[0-9a-z]{8,10}-[0-9a-z]{5}$"
               )
             )
 
@@ -266,3 +268,26 @@ spec:
         - record: "svc:mem_requests_lag_1m"
           expr: |
             svc:mem_requests offset 1m
+
+        # =====================================================
+        # 6) KPI-1 SUPPORT (HORIZON 5m) — NORM + ACTUAL(t+5m)
+        # =====================================================
+        - record: "svc:rps_tplus5m"
+          expr: |
+            svc:qps:rate1m offset 5m
+
+        - record: "svc:cpu_norm"
+          expr: |
+            svc:cpu_usage_rate_1m / clamp_min(svc:cpu_limits, 0.001)
+
+        - record: "svc:mem_norm"
+          expr: |
+            svc:mem_usage / clamp_min(svc:mem_limits, 1)
+
+        - record: "svc:cpu_norm_tplus5m"
+          expr: |
+            svc:cpu_norm offset 5m
+
+        - record: "svc:mem_norm_tplus5m"
+          expr: |
+            svc:mem_norm offset 5m

@@ -10,7 +10,7 @@ data:
     import json
     import math
     from datetime import datetime, timezone
-    from typing import Optional, Dict, Tuple
+    from typing import Optional, Dict, Tuple, List
 
     import mlflow
     from mlflow.tracking import MlflowClient
@@ -23,8 +23,12 @@ data:
         print("[ERROR] MLFLOW_TRACKING_URI is required", file=sys.stderr)
         sys.exit(1)
 
-    MODEL_NAME = os.getenv("MODEL_NAME", "cnn_lstm_forecast").strip()
+    # ---- LSTM defaults (match train_lstm.py) ----
+    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast").strip()
     EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME).strip()
+
+    # train_lstm.py logs artifacts to artifact_path="model"
+    MODEL_ARTIFACT_PATH = os.getenv("MODEL_ARTIFACT_PATH", "model").strip() or "model"
 
     TARGET_STAGE = os.getenv("TARGET_STAGE", "Production").strip() or "Production"
     ARCHIVE_OLD = os.getenv("ARCHIVE_OLD", "true").lower() == "true"
@@ -37,7 +41,7 @@ data:
     MIN_IMPROVE_P95 = float(os.getenv("MIN_IMPROVE_P95", "0.0"))
     MIN_IMPROVE_UNDER = float(os.getenv("MIN_IMPROVE_UNDER", "0.0"))
 
-    # Metrics keys (must exist in training run)
+    # Metrics keys (must exist in training run) - match train_lstm.py
     MET_TEST_WAPE_RPS = os.getenv("MET_TEST_WAPE_RPS", "test_wape_rps")
     MET_TEST_P95_ABS_ERR_RPS = os.getenv("MET_TEST_P95_ABS_ERR_RPS", "test_p95_abs_err_rps")
     MET_TEST_UNDER_RATE_RPS = os.getenv("MET_TEST_UNDER_RATE_RPS", "test_under_rate_rps")
@@ -84,7 +88,7 @@ data:
         runs = mlflow.search_runs(
             experiment_ids=[exp_id],
             order_by=["attributes.start_time DESC"],
-            max_results=50,
+            max_results=80,
         )
         if runs is None or len(runs) == 0:
             return None, None, "No runs found"
@@ -95,7 +99,7 @@ data:
                 continue
 
             wape = _to_float(r.get(f"metrics.{MET_TEST_WAPE_RPS}"))
-            p95 = _to_float(r.get(f"metrics.{MET_TEST_P95_ABS_ERR_RPS}"))
+            p95  = _to_float(r.get(f"metrics.{MET_TEST_P95_ABS_ERR_RPS}"))
             under = _to_float(r.get(f"metrics.{MET_TEST_UNDER_RATE_RPS}"))
 
             if wape is None or p95 is None or under is None:
@@ -108,10 +112,13 @@ data:
             }
             return run_id, met, None
 
-        return None, None, f"No recent run has all required metrics: {MET_TEST_WAPE_RPS}, {MET_TEST_P95_ABS_ERR_RPS}, {MET_TEST_UNDER_RATE_RPS}"
+        return None, None, (
+            f"No recent run has all required metrics: "
+            f"{MET_TEST_WAPE_RPS}, {MET_TEST_P95_ABS_ERR_RPS}, {MET_TEST_UNDER_RATE_RPS}"
+        )
 
     def _get_production_run_id() -> Optional[str]:
-        # Prefer explicit stage
+        # Prefer explicit stage query
         try:
             vers = client.get_latest_versions(MODEL_NAME, stages=[TARGET_STAGE])
             if vers:
@@ -119,7 +126,7 @@ data:
         except Exception:
             pass
 
-        # Fallback scan
+        # Fallback scan all versions
         try:
             vers = client.get_latest_versions(MODEL_NAME)
             for v in vers or []:
@@ -191,7 +198,7 @@ data:
             headers=headers,
             data=json.dumps(body).encode("utf-8") if body is not None else None,
             verify=ca_path,
-            timeout=15,
+            timeout=20,
         )
         if r.status_code >= 300:
             raise RuntimeError(f"K8S {method} {path} -> {r.status_code}: {r.text[:400]}")
@@ -233,12 +240,32 @@ data:
             client.create_registered_model(name)
             print(f"[INFO] Created registered model: {name}")
         except Exception as e:
-            # Might be created concurrently; ignore if already exists
             print(f"[WARN] create_registered_model ignored: {e}")
 
+    def find_existing_version_for_run(name: str, run_id: str) -> Optional[str]:
+        # If train_lstm.py already called mlflow.register_model, reuse that version (avoid duplicates).
+        try:
+            q = f"name='{name}' and run_id='{run_id}'"
+            vers = client.search_model_versions(q)
+            best = None
+            for v in vers or []:
+                ver = getattr(v, "version", None)
+                if ver is None:
+                    continue
+                # pick max numeric version
+                try:
+                    iv = int(str(ver))
+                except Exception:
+                    continue
+                if best is None or iv > best[0]:
+                    best = (iv, str(ver))
+            return best[1] if best else None
+        except Exception:
+            return None
+
     def create_model_version_for_run(name: str, run_id: str):
-        # Prefer runs:/ URI, fallback to artifact_uri/model
-        model_uri = f"runs:/{run_id}/model"
+        # Prefer runs:/ URI (matches train_lstm.py artifact_path="model")
+        model_uri = f"runs:/{run_id}/{MODEL_ARTIFACT_PATH}"
         try:
             mv = client.create_model_version(name=name, source=model_uri, run_id=run_id)
             return mv, model_uri, "runs_uri"
@@ -247,14 +274,15 @@ data:
             artifact_uri = (run.info.artifact_uri or "").rstrip("/")
             if not artifact_uri:
                 raise RuntimeError(f"Empty artifact_uri; runs_uri failed: {e1}")
-            source = f"{artifact_uri}/model"
+            source = f"{artifact_uri}/{MODEL_ARTIFACT_PATH}"
             mv = client.create_model_version(name=name, source=source, run_id=run_id)
             return mv, source, "artifact_uri"
 
     # ============================================================
     # Main
     # ============================================================
-    print(f"[INFO] Register start | model={MODEL_NAME} exp={EXPERIMENT_NAME} stage={TARGET_STAGE}")
+    print(f"[INFO] Register start | model={MODEL_NAME} exp={EXPERIMENT_NAME} stage={TARGET_STAGE} artifact_path={MODEL_ARTIFACT_PATH}")
+
     exp = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
     if exp is None:
         print(f"[ERROR] Experiment not found: {EXPERIMENT_NAME}", file=sys.stderr)
@@ -284,17 +312,24 @@ data:
             sys.exit(0)
         print("[INFO] Candidate decreased all 3 vs Production -> promote")
 
-    # Create model version + promote
-    serving_uri = f"runs:/{cand_run_id}/model"
+    # Create/reuse model version + promote
+    serving_uri = f"runs:/{cand_run_id}/{MODEL_ARTIFACT_PATH}"
     chosen_version = None
     registry_ok = False
     promoted = False
 
     try:
         ensure_registered_model_exists(MODEL_NAME)
-        mv, used_source, used_mode = create_model_version_for_run(MODEL_NAME, cand_run_id)
-        chosen_version = getattr(mv, "version", None)
-        print(f"[INFO] ModelVersion created | name={MODEL_NAME} version={chosen_version} source={used_source} mode={used_mode}")
+
+        # Reuse existing version if training already registered it
+        existing_ver = find_existing_version_for_run(MODEL_NAME, cand_run_id)
+        if existing_ver:
+            chosen_version = existing_ver
+            print(f"[INFO] Reuse existing ModelVersion | name={MODEL_NAME} version={chosen_version} (from run_id={cand_run_id})")
+        else:
+            mv, used_source, used_mode = create_model_version_for_run(MODEL_NAME, cand_run_id)
+            chosen_version = getattr(mv, "version", None)
+            print(f"[INFO] ModelVersion created | name={MODEL_NAME} version={chosen_version} source={used_source} mode={used_mode}")
 
         if chosen_version is not None:
             client.transition_model_version_stage(
@@ -318,6 +353,7 @@ data:
                 "MODEL_STAGE": TARGET_STAGE if registry_ok else "RUNS",
                 "MODEL_VERSION": str(chosen_version) if chosen_version is not None else "",
                 "RUN_ID": cand_run_id,
+                "MODEL_ARTIFACT_PATH": MODEL_ARTIFACT_PATH,
                 "UPDATED_AT": _now_iso(),
                 CONFIG_KEY_MODEL_URI: serving_uri,
             }

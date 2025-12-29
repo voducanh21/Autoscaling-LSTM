@@ -1,111 +1,106 @@
 import numpy as np
 import pandas as pd
 
-# Cho reproducible, có thể đổi seed nếu muốn
+# Reproducible
 np.random.seed(42)
 
-# ===== 1. Hệ số fit từ merged_order-service_2025-12-01 =====
+# =========================================================
+# 0) INPUT/OUTPUT
+# =========================================================
+IN_PATH = "order-service.csv"
+OUT_PATH = "order-service_filled_from_rps.csv"
 
-# cpu_cores_1m ≈ A_CPU * rps_1m + B_CPU
-A_CPU = 0.001617
-B_CPU = 0.003981
-CPU_SIGMA_FACTOR = 0.41       # ~41% quanh cpu_mean
-
-# latency_p95_ms ≈ A_P95 * cpu + B_P95
-A_P95 = 519.438
-B_P95 = 6.200
-P95_SIGMA_FACTOR = 0.52       # ~52% quanh p95_base
-
-# mem_bytes ≈ A_MEM * rps_1m + B_MEM
-A_MEM = 1_045_241.0
-B_MEM = 2.246848e8            # ~224.68 MB
-MEM_SIGMA_FACTOR = 0.034      # ~3.4% quanh mem_target
-
-# Baseline & limit cho memory
-MEM_MIN = 1.8e8               # ~180MB
-POD_MEM_LIMIT = 512 * 1024**2 # 512Mi ≈ 536,870,912 bytes
-
-
-# ===== 2. Đọc file chỉ có RPS =====
-
-df = pd.read_csv("order-service.csv")
-
+df = pd.read_csv(IN_PATH)
 if "rps_1m" not in df.columns:
     raise ValueError("File order-service.csv cần có cột 'rps_1m'")
 
-rps = df["rps_1m"].astype(float).values
-n = len(df)
+rps = df["rps_1m"].astype(float).to_numpy()
+rps = np.clip(rps, 0.0, None)
+n = len(rps)
 
+# =========================================================
+# 1) CPU model (giữ logic cũ)
+# cpu_cores_1m ≈ A_CPU * rps_1m + B_CPU + noise
+# =========================================================
+A_CPU = 0.001617
+B_CPU = 0.003981
+CPU_SIGMA_FACTOR = 0.41
 
-# ======================================================================
-# 3. CPU: dao động quanh cpu_mean(rps) nhưng KHÔNG bao giờ về 0
-# ======================================================================
-
-# CPU mean tuyến tính theo rps
 cpu_mean = A_CPU * rps + B_CPU
-
-# sigma = 0.41 * mean, nhưng không nhỏ hơn 0.002
 cpu_sigma = CPU_SIGMA_FACTOR * cpu_mean
 cpu_sigma = np.maximum(cpu_sigma, 0.002)
 
-# noise Gaussian
-cpu_noise = np.random.normal(loc=0.0, scale=cpu_sigma, size=n)
-cpu = cpu_mean + cpu_noise
+cpu = cpu_mean + np.random.normal(0.0, cpu_sigma, size=n)
 
-# ----- FIX LOW VALUES (QUAN TRỌNG) -----
-# Nếu cpu < MIN_CPU → fill bằng giá trị nhỏ realistic (random)
-MIN_CPU = 0.005     # ~5m cores, idle realistic
-MAX_CPU = 0.5       # upper bound thực tế
-
+MIN_CPU = 0.005
+MAX_CPU = 0.5
 low_mask = cpu < MIN_CPU
 if np.any(low_mask):
-    # random nhỏ để tránh pattern giả
-    cpu[low_mask] = np.random.uniform(MIN_CPU, 2*MIN_CPU, size=low_mask.sum())
-
-# clip upper bound
+    cpu[low_mask] = np.random.uniform(MIN_CPU, 2 * MIN_CPU, size=low_mask.sum())
 cpu = np.clip(cpu, None, MAX_CPU)
 
 df["cpu_cores_1m"] = cpu
 
-
-# ======================================================================
-# 4. P95: từ CPU + noise
-# ======================================================================
+# =========================================================
+# 2) P95 model (giữ logic cũ)
+# latency_p95_ms ≈ A_P95 * cpu + B_P95 + noise
+# =========================================================
+A_P95 = 519.438
+B_P95 = 6.200
+P95_SIGMA_FACTOR = 0.52
 
 p95_base = A_P95 * cpu + B_P95
-
-# σ_P95 = 0.52 * p95_base, tối thiểu 2ms
 p95_sigma = P95_SIGMA_FACTOR * p95_base
 p95_sigma = np.maximum(p95_sigma, 2.0)
 
-p95_noise = np.random.normal(loc=0.0, scale=p95_sigma, size=n)
-p95 = p95_base + p95_noise
-
-# clip thực tế
+p95 = p95_base + np.random.normal(0.0, p95_sigma, size=n)
 p95 = np.clip(p95, 1.0, 2000.0)
+
 df["latency_p95_ms"] = p95
 
+# =========================================================
+# 3) MEMORY theo yêu cầu mới: dao động xung quanh 0.2285 (norm)
+# - tạo mem_norm quanh baseline, có thể tăng rất nhẹ theo rps nhưng vẫn kẹp biên.
+# - đổi ra bytes bằng MEM_LIMIT_BYTES (match silver default = 1GiB)
+# =========================================================
+MEM_LIMIT_BYTES = 1024 * 1024 * 1024  # 1GiB (match silver default)
 
-# ======================================================================
-# 5. Memory: mem_target(rps) + noise, clip theo 512Mi
-# ======================================================================
+BASE_NORM = 0.2285
+LOW_NORM  = 0.2240   # biên dưới "dao động quanh" (có thể chỉnh)
+HIGH_NORM = 0.2340   # biên trên "dao động quanh" (có thể chỉnh)
 
-mem_target = A_MEM * rps + B_MEM
+# ngưỡng coi là "có tải" (để tăng nhẹ khi rps > threshold)
+LOAD_RPS_THRESHOLD = 1.0
 
-mem_sigma = MEM_SIGMA_FACTOR * mem_target
-mem_sigma = np.maximum(mem_sigma, 5e5)   # ~0.5MB
+# noise
+IDLE_SIGMA = 0.0015
+LOAD_SIGMA = 0.0010
 
-mem_noise = np.random.normal(loc=0.0, scale=mem_sigma, size=n)
-mem = mem_target + mem_noise
+mem_norm = np.empty(n, dtype=np.float64)
 
-# giữ mem trong range realistic
-mem = np.clip(mem, MEM_MIN, POD_MEM_LIMIT)
-df["mem_bytes"] = mem
+idle_mask = rps < LOAD_RPS_THRESHOLD
+load_mask = ~idle_mask
 
+# idle: quanh baseline
+mem_norm[idle_mask] = BASE_NORM + np.random.normal(0.0, IDLE_SIGMA, size=int(idle_mask.sum()))
+mem_norm[idle_mask] = np.clip(mem_norm[idle_mask], LOW_NORM, HIGH_NORM)
 
-# ======================================================================
-# 6. Lưu ra file mới
-# ======================================================================
+# load: tăng nhẹ theo rps, nhưng vẫn kẹp biên
+if np.any(load_mask):
+    r = rps[load_mask]
+    ramp = (1.0 - np.exp(-r / 80.0))  # 0..~1 bão hòa nhanh
+    load_mean = BASE_NORM + 0.0020 * ramp  # tăng tối đa ~+0.002
+    mem_norm[load_mask] = load_mean + np.random.normal(0.0, LOAD_SIGMA, size=len(r))
+    mem_norm[load_mask] = np.clip(mem_norm[load_mask], LOW_NORM, HIGH_NORM)
 
-df.to_csv("order-service_filled_from_rps.csv", index=False)
-print("Đã tạo order-service_filled_from_rps.csv với CPU, P95, mem từ RPS (profile merged_order-service + limit 512Mi).")
+mem_bytes = mem_norm * MEM_LIMIT_BYTES
+
+# giữ thêm mem_norm để debug/đối chiếu Prometheus/silver
+df["mem_norm"] = mem_norm.astype(np.float32)
+df["mem_bytes"] = mem_bytes.astype(np.float64)
+
+# =========================================================
+# 4) SAVE
+# =========================================================
+df.to_csv(OUT_PATH, index=False)
+print(f"OK -> wrote {OUT_PATH}")

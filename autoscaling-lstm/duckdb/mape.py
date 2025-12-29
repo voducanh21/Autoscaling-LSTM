@@ -12,9 +12,12 @@ REQUEST_TIMEOUT = int(os.getenv("PROM_TIMEOUT_SECONDS", "30"))
 # ============================================================
 # 2) TIME RANGE
 # ============================================================
-START_ISO = os.getenv("START_ISO", "2025-12-18T10:59:02Z")
-DURATION_MINUTES = int(os.getenv("DURATION_MINUTES", "30"))
-STEP = int(os.getenv("STEP_SECONDS", "30"))
+START_ISO = os.getenv("START_ISO", "2025-12-28T19:48:50Z")
+DURATION_MINUTES = int(os.getenv("DURATION_MINUTES", "120"))
+
+# Force 60s sampling (query + output)
+STEP = int(os.getenv("STEP_SECONDS", "60"))
+OUTPUT_INTERVAL = int(os.getenv("OUTPUT_INTERVAL_SECONDS", "60"))
 
 # ============================================================
 # CONSTANTS
@@ -22,22 +25,12 @@ STEP = int(os.getenv("STEP_SECONDS", "30"))
 APPS_NAMESPACE = os.getenv("APPS_NAMESPACE", "apps")
 MODEL_NAMESPACE = os.getenv("MODEL_NAMESPACE", "model")
 
-# Prometheus job label của predictor-exporter (ServiceMonitor: jobLabel: app)
+# Fallback (trường hợp job label không như kỳ vọng)
 PRED_JOB = os.getenv("PRED_JOB", "predictor-exporter").strip()
 
 HORIZON_MIN = int(os.getenv("HORIZON_MINUTES", "5"))
 TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 TZ = ZoneInfo(TZ_NAME)
-
-MEM_LIMIT_BYTES = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))
-
-CPU_LIMIT_MAP = {
-    "api-gateway": 1.0,
-    "authentication-service": 0.5,
-    "order-service": 0.5,
-    "payment-service": 0.5,
-    "product-service": 1.0,
-}
 
 SERVICES = [
     "api-gateway",
@@ -47,7 +40,7 @@ SERVICES = [
     "product-service",
 ]
 
-# K8s Service name của exporter -> label `service` trong Prometheus thường = Service name
+# (optional) fallback theo tên Service của exporter
 EXPORTER_SERVICE_NAME = {
     "api-gateway": "predictor-exporter-api-gateway",
     "authentication-service": "predictor-exporter-authentication",
@@ -74,8 +67,11 @@ def resolve_time_range():
     print(f"[INFO] PROM_URL={PROM_URL}")
     print(f"[INFO] START_ISO={START_ISO} -> start_ts={start_ts}")
     print(f"[INFO] DURATION_MINUTES={DURATION_MINUTES} -> end_ts={end_ts}")
-    print(f"[INFO] STEP_SECONDS={STEP}")
-    print(f"[INFO] PRED_JOB={PRED_JOB}, MODEL_NAMESPACE={MODEL_NAMESPACE}, HORIZON_MIN={HORIZON_MIN}")
+    print(f"[INFO] STEP_SECONDS(query)={STEP}")
+    print(f"[INFO] OUTPUT_INTERVAL_SECONDS(csv)={OUTPUT_INTERVAL}")
+    print(f"[INFO] MODEL_NAMESPACE={MODEL_NAMESPACE}, APPS_NAMESPACE={APPS_NAMESPACE}, HORIZON_MIN={HORIZON_MIN}")
+    print(f"[INFO] PRED_JOB(fallback)={PRED_JOB}")
+    print(f"[INFO] ALIGNMENT: predictor predicts t+{HORIZON_MIN}m, so we evaluate obs(t) vs pred(t-{HORIZON_MIN}m) using PromQL offset on PRED.")
     return start_ts, end_ts
 
 def prom_query_range(query: str, start_ts: int, end_ts: int, step: int):
@@ -94,21 +90,39 @@ def prom_query_range(query: str, start_ts: int, end_ts: int, step: int):
     return result[0].get("values", [])
 
 def prom_query_range_first(queries, start_ts: int, end_ts: int, step: int):
-    """
-    Thử nhiều query theo thứ tự; query nào có data thì dùng query đó.
-    """
     for q in queries:
         vals = prom_query_range(q, start_ts, end_ts, step)
         if vals:
-            return vals
-    return []
+            return vals, q
+    return [], ""
+
+def fmt_local(ts_epoch: int) -> str:
+    return datetime.fromtimestamp(ts_epoch, tz=TZ).isoformat()
+
+def safe_ape_pct(obs, pred):
+    """
+    APE% = 100 * |obs - pred| / |obs|
+    Chỉ tránh chia cho 0 tuyệt đối.
+    """
+    if obs is None or pred is None:
+        return None
+    den = abs(float(obs))
+    if den == 0.0:
+        return None
+    return 100.0 * abs(float(obs) - float(pred)) / den
+
+def mean(xs):
+    return (sum(xs) / len(xs)) if xs else None
 
 def write_csv_timeseries(path: str, rows):
     fields = [
         "ts_epoch","ts_local","service",
-        "obs_rps","pred_rps","ape_rps",
-        "obs_cpu_norm","pred_cpu_norm","ape_cpu",
-        "obs_mem_norm","pred_mem_norm","ape_mem",
+        # obs(t)
+        "obs_rps","obs_cpu_norm","obs_mem_norm",
+        # pred(t-5m) meaning: prediction made 5m earlier for current t
+        "pred_rps_tminus_horizon","pred_cpu_norm_tminus_horizon","pred_mem_norm_tminus_horizon",
+        # errors
+        "ape_rps_pct","ape_cpu_pct","ape_mem_pct",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -116,16 +130,8 @@ def write_csv_timeseries(path: str, rows):
         for row in rows:
             w.writerow(row)
 
-def safe_ape(obs, pred, eps):
-    if obs is None or pred is None:
-        return None
-    den = abs(obs)
-    if den < eps:
-        return None
-    return abs(obs - pred) / den
-
-def fmt_local(ts_epoch: int) -> str:
-    return datetime.fromtimestamp(ts_epoch, tz=TZ).isoformat()
+def ts_bucket(ts: int, interval: int) -> int:
+    return (ts // interval) * interval
 
 # ============================================================
 # MAIN
@@ -137,103 +143,166 @@ def main():
     summary = []
 
     for svc in SERVICES:
-        cpu_limit = CPU_LIMIT_MAP[svc]
-        exporter_svc_name = EXPORTER_SERVICE_NAME.get(svc)
+        exporter_svc_name = EXPORTER_SERVICE_NAME.get(svc, "")
 
-        if not exporter_svc_name:
-            print(f"[WARN] No exporter service name mapping for svc={svc}, skip pred metrics.")
-            exporter_svc_name = ""
-
-        # ---- Predicted: FIX label match để có data ----
-        # Primary: match theo job + namespace + service(ServiceName)
-        # Fallback: match theo job + namespace + label_service(k8s label `service: <svc>`)
+        # ============================================================
+        # PRED: dùng offset HORIZON để lấy pred(t-H) (dự báo cho thời điểm t)
+        # IMPORTANT: offset phải nằm ngay sau selector metric{...}
+        # ============================================================
         pred_rps_qs = [
-            f'avg(lstm_pred_rps{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)',
-            f'avg(lstm_pred_rps{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_rps{{namespace="{MODEL_NAMESPACE}",job="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_rps{{namespace="{MODEL_NAMESPACE}",job="{PRED_JOB}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_rps{{namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)' if exporter_svc_name else "",
         ]
         pred_cpu_qs = [
-            f'avg(lstm_pred_cpu{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)',
-            f'avg(lstm_pred_cpu{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_cpu{{namespace="{MODEL_NAMESPACE}",job="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_cpu{{namespace="{MODEL_NAMESPACE}",job="{PRED_JOB}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_cpu{{namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)' if exporter_svc_name else "",
         ]
         pred_mem_qs = [
-            f'avg(lstm_pred_mem{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)',
-            f'avg(lstm_pred_mem{{job="{PRED_JOB}",namespace="{MODEL_NAMESPACE}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_mem{{namespace="{MODEL_NAMESPACE}",job="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_mem{{namespace="{MODEL_NAMESPACE}",job="{PRED_JOB}",label_service="{svc}"}} offset {HORIZON_MIN}m)',
+            f'avg(lstm_pred_mem{{namespace="{MODEL_NAMESPACE}",service="{exporter_svc_name}"}} offset {HORIZON_MIN}m)' if exporter_svc_name else "",
         ]
 
-        # ---- Observed ----
-        obs_rps_q = f'svc:qps:rate1m{{job="{svc}"}}'
-        obs_cpu_q = f'avg(pod:cpu:usage1m{{namespace="{APPS_NAMESPACE}",pod=~"{svc}-.*"}}) / {cpu_limit}'
-        obs_mem_q = f'avg(pod:mem:usage{{namespace="{APPS_NAMESPACE}",pod=~"{svc}-.*"}}) / {MEM_LIMIT_BYTES}'
+        pred_rps_qs = [q for q in pred_rps_qs if q]
+        pred_cpu_qs = [q for q in pred_cpu_qs if q]
+        pred_mem_qs = [q for q in pred_mem_qs if q]
 
-        series = {
-            "pred_rps": prom_query_range_first(pred_rps_qs, start_ts, end_ts, STEP),
-            "pred_cpu": prom_query_range_first(pred_cpu_qs, start_ts, end_ts, STEP),
-            "pred_mem": prom_query_range_first(pred_mem_qs, start_ts, end_ts, STEP),
-            "obs_rps":  prom_query_range(obs_rps_q,  start_ts, end_ts, STEP),
-            "obs_cpu":  prom_query_range(obs_cpu_q,  start_ts, end_ts, STEP),
-            "obs_mem":  prom_query_range(obs_mem_q,  start_ts, end_ts, STEP),
-        }
+        # ============================================================
+        # OBS: lấy actual tại thời điểm t (KHÔNG offset)
+        # ============================================================
+        obs_rps_qs = [
+            f'svc:qps:rate1m{{job="{svc}"}}',
+        ]
+        obs_cpu_norm_qs = [
+            f'svc:cpu_norm{{job="{svc}"}}',  # nếu bạn có rule này
+            f'(svc:cpu_usage_rate_1m{{job="{svc}"}}) / clamp_min((svc:cpu_limits{{job="{svc}"}}), 0.001)',
+        ]
+        obs_mem_norm_qs = [
+            f'svc:mem_norm{{job="{svc}"}}',  # nếu bạn có rule này
+            f'(svc:mem_usage{{job="{svc}"}}) / clamp_min((svc:mem_limits{{job="{svc}"}}), 1)',
+        ]
 
+        # ============================================================
+        # QUERY (step=60s)
+        # ============================================================
+        pred_rps_vals, pred_rps_used = prom_query_range_first(pred_rps_qs, start_ts, end_ts, STEP)
+        pred_cpu_vals, pred_cpu_used = prom_query_range_first(pred_cpu_qs, start_ts, end_ts, STEP)
+        pred_mem_vals, pred_mem_used = prom_query_range_first(pred_mem_qs, start_ts, end_ts, STEP)
+
+        obs_rps_vals, obs_rps_used = prom_query_range_first(obs_rps_qs, start_ts, end_ts, STEP)
+        obs_cpu_vals, obs_cpu_used = prom_query_range_first(obs_cpu_norm_qs, start_ts, end_ts, STEP)
+        obs_mem_vals, obs_mem_used = prom_query_range_first(obs_mem_norm_qs, start_ts, end_ts, STEP)
+
+        print(f"[INFO] svc={svc}")
+        print(f"       pred_rps_q={pred_rps_used or 'NONE'}")
+        print(f"       pred_cpu_q={pred_cpu_used or 'NONE'}")
+        print(f"       pred_mem_q={pred_mem_used or 'NONE'}")
+        print(f"       obs_rps_q ={obs_rps_used or 'NONE'}")
+        print(f"       obs_cpu_q ={obs_cpu_used or 'NONE'}")
+        print(f"       obs_mem_q ={obs_mem_used or 'NONE'}")
         print(
-            f"[INFO] svc={svc} exporter_service={exporter_svc_name} "
-            f"points(pred_rps={len(series['pred_rps'])}, pred_cpu={len(series['pred_cpu'])}, pred_mem={len(series['pred_mem'])}, "
-            f"obs_rps={len(series['obs_rps'])}, obs_cpu={len(series['obs_cpu'])}, obs_mem={len(series['obs_mem'])})"
+            f"       points(raw pred_rps(t-{HORIZON_MIN}m)={len(pred_rps_vals)}, pred_cpu={len(pred_cpu_vals)}, pred_mem={len(pred_mem_vals)}, "
+            f"obs(t) rps={len(obs_rps_vals)}, cpu_norm={len(obs_cpu_vals)}, mem_norm={len(obs_mem_vals)})"
         )
 
-        by_ts = {}
-        for k, vals in series.items():
+        # ============================================================
+        # BUCKET về lưới 60s để tránh lệch 30s
+        # ============================================================
+        buckets = {}
+
+        def ingest_bucketed(key, vals):
             for t, v in vals:
                 ts = int(float(t))
+                b = ts_bucket(ts, OUTPUT_INTERVAL)
                 try:
-                    by_ts.setdefault(ts, {})[k] = float(v)
+                    cur = buckets.setdefault(b, {})
+                    cur["_latest_ts_" + key] = max(cur.get("_latest_ts_" + key, -1), ts)
+                    cur[key] = float(v)
                 except Exception:
-                    # bỏ qua nếu parse fail
                     pass
+
+        ingest_bucketed("pred_rps_tminus", pred_rps_vals)
+        ingest_bucketed("pred_cpu_tminus", pred_cpu_vals)
+        ingest_bucketed("pred_mem_tminus", pred_mem_vals)
+
+        ingest_bucketed("obs_rps", obs_rps_vals)
+        ingest_bucketed("obs_cpu_norm", obs_cpu_vals)
+        ingest_bucketed("obs_mem_norm", obs_mem_vals)
 
         ape_rps_list, ape_cpu_list, ape_mem_list = [], [], []
 
-        for ts in sorted(by_ts.keys()):
-            d = by_ts[ts]
-            obs_rps = d.get("obs_rps");  pred_rps = d.get("pred_rps")
-            obs_cpu = d.get("obs_cpu");  pred_cpu = d.get("pred_cpu")
-            obs_mem = d.get("obs_mem");  pred_mem = d.get("pred_mem")
+        for bts in sorted(buckets.keys()):
+            d = buckets[bts]
 
-            ape_rps = safe_ape(obs_rps, pred_rps, 1e-3)
-            ape_cpu = safe_ape(obs_cpu, pred_cpu, 1e-4)
-            ape_mem = safe_ape(obs_mem, pred_mem, 1e-4)
+            obs_rps = d.get("obs_rps")
+            pred_rps = d.get("pred_rps_tminus")
+
+            obs_cpu = d.get("obs_cpu_norm")
+            pred_cpu = d.get("pred_cpu_tminus")
+
+            obs_mem = d.get("obs_mem_norm")
+            pred_mem = d.get("pred_mem_tminus")
+
+            ape_rps = safe_ape_pct(obs_rps, pred_rps)
+            ape_cpu = safe_ape_pct(obs_cpu, pred_cpu)
+            ape_mem = safe_ape_pct(obs_mem, pred_mem)
 
             if ape_rps is not None: ape_rps_list.append(ape_rps)
             if ape_cpu is not None: ape_cpu_list.append(ape_cpu)
             if ape_mem is not None: ape_mem_list.append(ape_mem)
 
             all_rows.append({
-                "ts_epoch": ts,
-                "ts_local": fmt_local(ts),
+                "ts_epoch": bts,
+                "ts_local": fmt_local(bts),
                 "service": svc,
-                "obs_rps": obs_rps, "pred_rps": pred_rps, "ape_rps": ape_rps,
-                "obs_cpu_norm": obs_cpu, "pred_cpu_norm": pred_cpu, "ape_cpu": ape_cpu,
-                "obs_mem_norm": obs_mem, "pred_mem_norm": pred_mem, "ape_mem": ape_mem,
+
+                "obs_rps": obs_rps,
+                "obs_cpu_norm": obs_cpu,
+                "obs_mem_norm": obs_mem,
+
+                "pred_rps_tminus_horizon": pred_rps,
+                "pred_cpu_norm_tminus_horizon": pred_cpu,
+                "pred_mem_norm_tminus_horizon": pred_mem,
+
+                "ape_rps_pct": ape_rps,
+                "ape_cpu_pct": ape_cpu,
+                "ape_mem_pct": ape_mem,
             })
 
-        def mean(xs): return (sum(xs) / len(xs)) if xs else None
+        mape_rps = mean(ape_rps_list)
+        mape_cpu = mean(ape_cpu_list)
+        mape_mem = mean(ape_mem_list)
+
         summary.append({
             "service": svc,
-            "mape_rps": mean(ape_rps_list),
-            "mape_cpu": mean(ape_cpu_list),
-            "mape_mem": mean(ape_mem_list),
+            "mape_rps_pct": mape_rps,
+            "mape_cpu_pct": mape_cpu,
+            "mape_mem_pct": mape_mem,
             "n_points_rps": len(ape_rps_list),
             "n_points_cpu": len(ape_cpu_list),
             "n_points_mem": len(ape_mem_list),
         })
 
+        print(
+            f"[SUMMARY] svc={svc} | "
+            f"MAPE_RPS%={mape_rps if mape_rps is not None else 'n/a'} (n={len(ape_rps_list)}), "
+            f"MAPE_CPU%={mape_cpu if mape_cpu is not None else 'n/a'} (n={len(ape_cpu_list)}), "
+            f"MAPE_MEM%={mape_mem if mape_mem is not None else 'n/a'} (n={len(ape_mem_list)})"
+        )
+
+    # ============================================================
+    # WRITE CSV
+    # ============================================================
     write_csv_timeseries("forecast_eval_timeseries.csv", all_rows)
 
     with open("forecast_eval_summary.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
             fieldnames=[
-                "service","mape_rps","mape_cpu","mape_mem",
-                "n_points_rps","n_points_cpu","n_points_mem"
+                "service","mape_rps_pct","mape_cpu_pct","mape_mem_pct",
+                "n_points_rps","n_points_cpu","n_points_mem",
             ],
         )
         w.writeheader()

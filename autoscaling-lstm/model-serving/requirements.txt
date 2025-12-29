@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 pandas
-mlflow
+mlflow==3.8.0
 boto3
 tensorflow==2.16.1
-keras==3.12.0
+keras==3.13.0
 numpy==1.26.4
