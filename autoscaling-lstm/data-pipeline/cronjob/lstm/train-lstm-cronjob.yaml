@@ -113,6 +113,9 @@ spec:
                 - name: DATE_SEED
                   value: "42"
 
+                - name: TARGET_RPS_LOG1P
+                  value: "true"
+
                 # --- MINIO credentials ---
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:

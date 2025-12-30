@@ -1,0 +1,765 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: train-lstm-script-smoothshift
+  namespace: cronjob
+data:
+  train_lstm.py: |
+    import os, sys, math, time, hashlib, random, gc, shutil, warnings
+
+    # =============================
+    # QUIET MODE (only important logs)
+    # =============================
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "0")
+    os.environ.setdefault("MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR", "0")
+
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    warnings.filterwarnings("ignore", category=FutureWarning)
+
+    import s3fs
+    import pandas as pd
+    import pyarrow.parquet as pq
+    import numpy as np
+    from datetime import timezone, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    import tensorflow as tf
+    from tensorflow.keras.layers import Input, Embedding, LSTM, Dense, Dropout, Concatenate, Normalization
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+    from sklearn.metrics import mean_absolute_error
+    import mlflow
+    import mlflow.keras
+
+    # =============================
+    # Metrics helpers
+    # =============================
+    def wape(y_true, y_pred, eps=1e-6):
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        denom = float(np.sum(np.abs(y_true)))
+        if denom < eps:
+            return 0.0
+        return float(np.sum(np.abs(y_true - y_pred)) / denom)
+
+    def md5_list(items):
+        s = "|".join(map(str, items))
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+    def set_global_seed(seed: int):
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        tf.random.set_seed(seed)
+
+    # =============================
+    # ENV
+    # =============================
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+    SILVER_PREFIX = os.getenv("SILVER_PREFIX", "silver/metrics")
+    BUCKET = os.getenv("S3_BUCKET", "datalake")
+    MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
+
+    WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "10"))
+    EPOCHS = int(os.getenv("EPOCHS", "20"))
+    BATCH = int(os.getenv("BATCH_SIZE", "128"))
+
+    HORIZON_MINUTES = int(os.getenv("HORIZON_MINUTES", "5"))
+    HORIZON_NS = int(HORIZON_MINUTES) * 60 * 1_000_000_000
+
+    EXTRA_EMBARGO_MINUTES = int(os.getenv("EXTRA_EMBARGO_MINUTES", "0"))
+    EXTRA_EMBARGO_NS = int(EXTRA_EMBARGO_MINUTES) * 60 * 1_000_000_000
+
+    # Cách A: mượt trước rồi shift
+    TARGET_MODE = os.getenv("TARGET_MODE", "smooth_before_shift").lower().strip()  # smooth_before_shift | point
+    SMOOTH_WINDOW_MINUTES = int(os.getenv("SMOOTH_WINDOW_MINUTES", "5"))
+
+    # log1p cho target RPS (default true)
+    TARGET_RPS_LOG1P = os.getenv("TARGET_RPS_LOG1P", "true").lower() == "true"
+
+    # Optional: register model (default false)
+    REGISTER_MODEL = os.getenv("REGISTER_MODEL", "false").lower() == "true"
+
+    # Fixed split: 80/10/10 (time-based)
+    TRAIN_FRAC = float(os.getenv("TRAIN_FRAC", "0.80"))
+    VAL_FRAC   = float(os.getenv("VAL_FRAC", "0.10"))
+    if TRAIN_FRAC <= 0 or VAL_FRAC <= 0 or (TRAIN_FRAC + VAL_FRAC) >= 1.0:
+        print("[ERROR] Invalid TRAIN_FRAC/VAL_FRAC. Require TRAIN_FRAC>0, VAL_FRAC>0, TRAIN_FRAC+VAL_FRAC<1", file=sys.stderr)
+        sys.exit(1)
+    TEST_FRAC = 1.0 - TRAIN_FRAC - VAL_FRAC
+
+    TRAIN_SEED = int(os.getenv("TRAIN_SEED", "42"))
+
+    LOG_TEST_PER_SERVICE = os.getenv("LOG_TEST_PER_SERVICE", "true").lower() == "true"
+    MIN_P95_SAMPLES = int(os.getenv("MIN_P95_SAMPLES", "50"))
+
+    TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
+    try:
+        TZ = ZoneInfo(TZ_NAME)
+    except Exception:
+        TZ = timezone.utc
+
+    FORCE_HTTP = os.getenv("AWS_STORAGE_FORCE_HTTP", "false").lower() == "true"
+    client_args = {"endpoint_url": S3_ENDPOINT}
+    if FORCE_HTTP:
+        client_args["verify"] = False
+
+    DATE_FRACTION = float(os.getenv("DATE_FRACTION", "1.0"))
+    DATE_PICK_MODE = os.getenv("DATE_PICK_MODE", "all").lower()
+    DATE_SEED = int(os.getenv("DATE_SEED", "42"))
+    set_global_seed(DATE_SEED)
+
+    MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast_smoothshift")
+    EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME)
+    FEATURE_SET = f"with_roll_lag__target_{TARGET_MODE}__smooth{SMOOTH_WINDOW_MINUTES}m" + ("__rpslog1p" if TARGET_RPS_LOG1P else "")
+
+    def inv_rps_transform(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x)
+        if not TARGET_RPS_LOG1P:
+            return x.astype(np.float32)
+        y = np.expm1(x.astype(np.float64))
+        y = np.clip(y, 0.0, None)
+        return y.astype(np.float32)
+
+    # =============================
+    # MLflow hardening
+    # =============================
+    try:
+        if hasattr(mlflow, "config") and hasattr(mlflow.config, "enable_async_logging"):
+            mlflow.config.enable_async_logging(False)
+    except Exception:
+        pass
+
+    def _is_duplicate_metric_exc(e: Exception) -> bool:
+        s = str(e)
+        return ("metric_pk" in s) or ("duplicate key value violates unique constraint" in s)
+
+    def log_param_safe(k, v):
+        try:
+            mlflow.log_param(k, v)
+        except Exception:
+            pass
+
+    def log_metric_safe(k, v, step: int):
+        try:
+            mlflow.log_metric(k, float(v), step=int(step))
+        except Exception as e:
+            if _is_duplicate_metric_exc(e):
+                return
+            raise
+
+    # =============================
+    # S3 load
+    # =============================
+    print(f"[INFO] Start | model={MODEL_NAME} exp={EXPERIMENT_NAME} window={WINDOW_SIZE} horizon_min={HORIZON_MINUTES} target_mode={TARGET_MODE} smooth_win={SMOOTH_WINDOW_MINUTES}m target_rps_log1p={TARGET_RPS_LOG1P}")
+
+    fs = s3fs.S3FileSystem(key=AWS_KEY, secret=AWS_SECRET, client_kwargs=client_args)
+    prefix = f"{BUCKET}/{SILVER_PREFIX}/"
+    svc_paths = fs.glob(prefix + "date=*/service=*/")
+    if not svc_paths:
+        print(f"[ERROR] No silver folders under {prefix}", file=sys.stderr)
+        sys.exit(1)
+
+    all_dates = set()
+    for p in svc_paths:
+        try:
+            d = p.split("/date=")[1].split("/")[0]
+            all_dates.add(d)
+        except Exception:
+            pass
+    dates_sorted = sorted(all_dates)
+    if not dates_sorted:
+        print("[ERROR] No date partitions found.", file=sys.stderr)
+        sys.exit(1)
+
+    if 0.0 < DATE_FRACTION < 1.0:
+        k = max(1, int(math.ceil(len(dates_sorted) * DATE_FRACTION)))
+        if DATE_PICK_MODE == "first":
+            picked_dates = dates_sorted[:k]
+        elif DATE_PICK_MODE == "hash":
+            rng = np.random.default_rng(DATE_SEED)
+            idx = np.sort(rng.choice(len(dates_sorted), size=k, replace=False))
+            picked_dates = sorted([dates_sorted[i] for i in idx])
+        else:
+            picked_dates = dates_sorted[-k:]
+    else:
+        picked_dates = dates_sorted
+    picked_set = set(picked_dates)
+
+    dfs = []
+    for path in svc_paths:
+        try:
+            date_part = path.split("/date=")[1].split("/")[0]
+            service = path.split("/service=")[1].split("/")[0]
+            if date_part not in picked_set:
+                continue
+            parquet_files = sorted(fs.glob(f"{prefix}date={date_part}/service={service}/part-*.parquet"))
+            for f in parquet_files:
+                with fs.open(f, "rb") as fobj:
+                    _df = pq.read_table(fobj).to_pandas()
+                    _df["service"] = service
+                    _df["date_part"] = date_part
+                    dfs.append(_df)
+        except Exception:
+            continue
+
+    if not dfs:
+        print("[ERROR] No parquet loaded (after date filtering).", file=sys.stderr)
+        sys.exit(1)
+
+    df = pd.concat(dfs, ignore_index=True)
+    df["__row_order"] = np.arange(len(df), dtype=np.int64)
+    n_rows_loaded = int(len(df))
+
+    if "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        df = df.dropna(subset=["ts"])
+        df = df.sort_values(["service", "ts", "__row_order"]).drop_duplicates(subset=["service", "ts"], keep="last")
+
+    FIXED_ORDER = ["api-gateway", "authentication-service", "order-service", "payment-service", "product-service"]
+    df = df[df["service"].isin(FIXED_ORDER)].copy()
+    SERVICE_TO_ID = {svc: i for i, svc in enumerate(FIXED_ORDER)}
+    df["service_id"] = df["service"].map(SERVICE_TO_ID).astype(int)
+    num_services = len(FIXED_ORDER)
+
+    # Required base cols from silver
+    REQUIRED_BASE = [
+        "rps_1m","latency_p95_ms","cpu_norm","mem_norm",
+        "rps_roll_mean_5m","rps_roll_mean_15m","rps_lag_1m","cpu_lag_1m","mem_lag_1m",
+        "hour","dow",
+        # keep original futures in case you want inspect, but not used when TARGET_MODE=smooth_before_shift
+        "rps_future","cpu_future","mem_future",
+    ]
+    missing = [c for c in REQUIRED_BASE if c not in df.columns]
+    if missing:
+        print(f"[ERROR] Missing columns in silver: {missing}", file=sys.stderr)
+        sys.exit(1)
+
+    df = df.dropna(subset=REQUIRED_BASE)
+
+    keep_cols = list(dict.fromkeys(
+        (["ts"] if "ts" in df.columns else [])
+        + REQUIRED_BASE
+        + ["service","service_id","date_part","__row_order"]
+    ))
+    df = df[keep_cols].dropna().reset_index(drop=True)
+    rows_after_filter = int(len(df))
+
+    LOG1P_COLS = ["rps_1m", "latency_p95_ms", "rps_roll_mean_5m", "rps_roll_mean_15m", "rps_lag_1m"]
+
+    def add_cyclical_time_features(g: pd.DataFrame) -> pd.DataFrame:
+        h = g["hour"].astype(float).values
+        d = g["dow"].astype(float).values
+        g["hour_sin"] = np.sin(2.0 * np.pi * h / 24.0)
+        g["hour_cos"] = np.cos(2.0 * np.pi * h / 24.0)
+        g["dow_sin"]  = np.sin(2.0 * np.pi * d / 7.0)
+        g["dow_cos"]  = np.cos(2.0 * np.pi * d / 7.0)
+        return g
+
+    input_cols = [
+        "rps_1m_log1p",
+        "latency_p95_ms_log1p",
+        "cpu_norm",
+        "mem_norm",
+        "rps_roll_mean_5m_log1p",
+        "rps_roll_mean_15m_log1p",
+        "rps_lag_1m_log1p",
+        "cpu_lag_1m",
+        "mem_lag_1m",
+        "hour_sin",
+        "hour_cos",
+        "dow_sin",
+        "dow_cos",
+    ]
+
+    time_candidates = ["ts", "timestamp", "time", "datetime", "date_time", "event_time"]
+    time_col = "ts" if "ts" in df.columns else next((c for c in time_candidates if c in df.columns), None)
+    if time_col is None:
+        print("[ERROR] No time column found.", file=sys.stderr)
+        sys.exit(1)
+
+    def _ensure_datetime_series(s: pd.Series) -> pd.Series:
+        if not pd.api.types.is_datetime64_any_dtype(s):
+            s = pd.to_datetime(s, errors="coerce")
+        return s
+
+    def _sort_group(g: pd.DataFrame) -> pd.DataFrame:
+        g[time_col] = _ensure_datetime_series(g[time_col])
+        g = g.dropna(subset=[time_col]).copy()
+        if pd.api.types.is_datetime64tz_dtype(g[time_col]):
+            try:
+                g[time_col] = g[time_col].dt.tz_convert(TZ)
+            except Exception:
+                pass
+        else:
+            try:
+                g[time_col] = g[time_col].dt.tz_localize(TZ)
+            except Exception:
+                pass
+        return g.sort_values([time_col, "__row_order"])
+
+    # =============================
+    # Build targets for Cách A
+    # rps_smooth(t) = past 5m rolling mean of rps_1m  (already available as rps_roll_mean_5m)
+    # rps_future_smooth(t) = rps_smooth(t+H)  => shift(-H)
+    # same for cpu_norm, mem_norm using past 5m rolling mean then shift(-H)
+    # =============================
+    def add_smooth_before_shift_targets(g: pd.DataFrame) -> pd.DataFrame:
+        gg = g.copy()
+        gg = gg.set_index(time_col)
+
+        # ensure float
+        for c in ["cpu_norm", "mem_norm", "rps_1m", "rps_roll_mean_5m"]:
+            gg[c] = pd.to_numeric(gg[c], errors="coerce")
+
+        # smooth series (past-looking)
+        # rps_smooth uses silver's time-based rolling already
+        gg["rps_smooth"] = gg["rps_roll_mean_5m"]
+
+        win = f"{int(SMOOTH_WINDOW_MINUTES)}min"
+        gg["cpu_smooth"] = gg["cpu_norm"].rolling(win, min_periods=1).mean()
+        gg["mem_smooth"] = gg["mem_norm"].rolling(win, min_periods=1).mean()
+
+        # future target is shifted value of the *smooth* series at t+H
+        step = int(HORIZON_MINUTES)  # silver is 1-min frequency
+        gg["rps_future_used"] = gg["rps_smooth"].shift(-step)
+        gg["cpu_future_used"] = gg["cpu_smooth"].shift(-step)
+        gg["mem_future_used"] = gg["mem_smooth"].shift(-step)
+
+        gg = gg.reset_index()
+        return gg
+
+    # =============================
+    # Windowing (per service) - label aligned END-OF-WINDOW
+    # =============================
+    svc_packs = {}
+    total_windows = 0
+
+    def make_windows_for_service(g: pd.DataFrame, window: int):
+        sid = int(g["service_id"].iloc[0])
+
+        X_raw = g[input_cols].values.astype(np.float32)
+
+        # choose target
+        if TARGET_MODE == "smooth_before_shift":
+            y_raw = g[["rps_future_used", "cpu_future_used", "mem_future_used"]].values.astype(np.float32)
+            # baseline should be "current smooth" to predict future smooth
+            base_rps = g["rps_smooth"].astype(np.float32).values
+            base_cpu = g["cpu_smooth"].astype(np.float32).values
+            base_mem = g["mem_smooth"].astype(np.float32).values
+        else:
+            # fallback: original point target in silver
+            y_raw = g[["rps_future", "cpu_future", "mem_future"]].values.astype(np.float32)
+            base_rps = g["rps_1m"].astype(np.float32).values
+            base_cpu = g["cpu_norm"].astype(np.float32).values
+            base_mem = g["mem_norm"].astype(np.float32).values
+
+        # Optional: log1p transform target rps only (column 0)
+        if TARGET_RPS_LOG1P:
+            r = y_raw[:, 0].astype(np.float64)
+            r = np.clip(r, 0.0, None)
+            y_raw[:, 0] = np.log1p(r).astype(np.float32)
+
+        # time to UTC ns array
+        ts_s = g[time_col]
+        if not pd.api.types.is_datetime64_any_dtype(ts_s):
+            ts_s = pd.to_datetime(ts_s, errors="coerce")
+
+        if pd.api.types.is_datetime64tz_dtype(ts_s):
+            ts_utc = ts_s.dt.tz_convert("UTC")
+        else:
+            try:
+                ts_utc = ts_s.dt.tz_localize(TZ).dt.tz_convert("UTC")
+            except Exception:
+                ts_utc = pd.to_datetime(ts_s, errors="coerce", utc=True)
+
+        ts_utc = ts_utc.dropna()
+        if len(ts_utc) != len(g):
+            g2 = g.loc[ts_utc.index].copy()
+            if len(g2) < window:
+                return None
+            return make_windows_for_service(g2, window)
+
+        ts_ns = ts_utc.view("int64").to_numpy(dtype=np.int64)
+
+        if len(X_raw) < window:
+            return None
+
+        n = len(X_raw) - window + 1
+        if n <= 0:
+            return None
+
+        Xs = np.empty((n, window, X_raw.shape[1]), dtype=np.float32)
+        ys = np.empty((n, 3), dtype=np.float32)
+        Ss = np.empty((n, window), dtype=np.int32)
+        Bs = np.empty((n, 3), dtype=np.float32)
+        label_ns = np.empty((n,), dtype=np.int64)
+        target_ns = np.empty((n,), dtype=np.int64)
+
+        for i in range(n):
+            end = i + window - 1
+            Xs[i] = X_raw[i:i+window]
+            ys[i] = y_raw[end]
+            Ss[i] = sid
+            Bs[i] = [base_rps[end], base_cpu[end], base_mem[end]]
+            lab = int(ts_ns[end])
+            label_ns[i] = lab
+            target_ns[i] = lab + HORIZON_NS
+
+        # drop samples where target has NaN (happens at tail due to shift)
+        good = np.isfinite(ys).all(axis=1)
+        if not np.any(good):
+            return None
+
+        Xs = Xs[good]
+        ys = ys[good]
+        Ss = Ss[good]
+        Bs = Bs[good]
+        label_ns = label_ns[good]
+        target_ns = target_ns[good]
+
+        return dict(X=Xs, y=ys, S=Ss, B=Bs, label_ns=label_ns, target_ns=target_ns)
+
+    for svc_name, svc_id in SERVICE_TO_ID.items():
+        g = df[df["service_id"] == svc_id].copy()
+        if g.empty:
+            continue
+
+        g = _sort_group(g).reset_index(drop=True)
+        if g.empty:
+            continue
+
+        # log1p features
+        for c in LOG1P_COLS:
+            x = g[c].astype(float).values
+            x = np.clip(x, 0.0, None)
+            g[c + "_log1p"] = np.log1p(x).astype(np.float32)
+
+        g = add_cyclical_time_features(g)
+
+        # build targets used
+        if TARGET_MODE == "smooth_before_shift":
+            g = add_smooth_before_shift_targets(g)
+
+        # ensure required for windowing exists
+        if TARGET_MODE == "smooth_before_shift":
+            need = ["rps_smooth","cpu_smooth","mem_smooth","rps_future_used","cpu_future_used","mem_future_used"] + input_cols
+        else:
+            need = ["rps_future","cpu_future","mem_future"] + input_cols
+
+        g = g.dropna(subset=need).reset_index(drop=True)
+        if g.empty:
+            continue
+
+        pack = make_windows_for_service(g, WINDOW_SIZE)
+        if pack is None:
+            continue
+
+        svc_packs[svc_name] = pack
+        total_windows += int(pack["X"].shape[0])
+
+    if not svc_packs:
+        print("[ERROR] Not enough windowed data.", file=sys.stderr)
+        sys.exit(1)
+
+    # =============================
+    # Split boundaries
+    # =============================
+    def to_utc_ns_day_start(day_str: str) -> int:
+        t = pd.Timestamp(day_str, tz=TZ).tz_convert("UTC")
+        return int(t.value)
+
+    def next_day_str(day_str: str) -> str:
+        d = datetime.strptime(day_str, "%Y-%m-%d").date()
+        return (d + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    n_dates = len(picked_dates)
+    data_end_ns = to_utc_ns_day_start(next_day_str(picked_dates[-1]))
+
+    split_mode = "date_partitions"
+    if n_dates >= 3:
+        train_end_i = int(math.floor(n_dates * TRAIN_FRAC))
+        val_end_i   = int(math.floor(n_dates * (TRAIN_FRAC + VAL_FRAC)))
+
+        train_end_i = max(1, min(train_end_i, n_dates - 2))
+        val_end_i   = max(train_end_i + 1, min(val_end_i, n_dates - 1))
+
+        train_end_day = picked_dates[train_end_i]
+        val_end_day   = picked_dates[val_end_i]
+
+        train_end_ns = to_utc_ns_day_start(train_end_day)  # val starts
+        val_end_ns   = to_utc_ns_day_start(val_end_day)    # test starts
+    else:
+        split_mode = "timestamp_quantiles_fallback"
+        all_labels = []
+        for _, pack in svc_packs.items():
+            all_labels.append(pack["label_ns"])
+        all_labels = np.concatenate(all_labels, axis=0)
+        all_labels = np.unique(all_labels)
+        all_labels.sort()
+        if all_labels.size < 50:
+            print("[ERROR] Not enough timestamps to split 80/10/10 reliably.", file=sys.stderr)
+            sys.exit(1)
+
+        i80 = int(math.floor(all_labels.size * TRAIN_FRAC))
+        i90 = int(math.floor(all_labels.size * (TRAIN_FRAC + VAL_FRAC)))
+        i80 = max(1, min(i80, all_labels.size - 2))
+        i90 = max(i80 + 1, min(i90, all_labels.size - 1))
+
+        train_end_ns = int(all_labels[i80])
+        val_end_ns   = int(all_labels[i90])
+
+        train_end_day = "n/a"
+        val_end_day = "n/a"
+
+    train_target_cut_ns = int(train_end_ns) - int(EXTRA_EMBARGO_NS)
+
+    # =============================
+    # Model builder
+    # =============================
+    def build_model(feat_norm_layer: Normalization):
+        ts_input = Input(shape=(WINDOW_SIZE, len(input_cols)), name="timeseries")
+        svc_input = Input(shape=(WINDOW_SIZE,), name="service_id")
+
+        ts_normed = feat_norm_layer(ts_input)
+        emb = Embedding(input_dim=num_services, output_dim=8, name="service_embedding")(svc_input)
+        merged = Concatenate(axis=-1)([ts_normed, emb])
+
+        x = LSTM(128, return_sequences=True)(merged)
+        x = Dropout(0.2)(x)
+        x = LSTM(64)(x)
+        out = Dense(3)(x)
+
+        model = Model(inputs=[ts_input, svc_input], outputs=out)
+        model.compile(optimizer=Adam(1e-3), loss="mae")
+        return model
+
+    # =============================
+    # Train + Log
+    # =============================
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(EXPERIMENT_NAME)
+
+    print(f"[INFO] Data | dates={n_dates} rows={n_rows_loaded} rows_after_filter={rows_after_filter} windows={total_windows}")
+    print(f"[INFO] Split | mode={split_mode} train={TRAIN_FRAC:.2f} val={VAL_FRAC:.2f} test={TEST_FRAC:.2f} embargo_min={EXTRA_EMBARGO_MINUTES}")
+
+    with mlflow.start_run() as run:
+        log_param_safe("model_name", MODEL_NAME)
+        log_param_safe("feature_set", FEATURE_SET)
+        log_param_safe("target_mode", TARGET_MODE)
+        log_param_safe("smooth_window_minutes", SMOOTH_WINDOW_MINUTES)
+        log_param_safe("target_rps_log1p", str(TARGET_RPS_LOG1P).lower())
+        log_param_safe("window_size", WINDOW_SIZE)
+        log_param_safe("horizon_minutes", HORIZON_MINUTES)
+        log_param_safe("extra_embargo_minutes", EXTRA_EMBARGO_MINUTES)
+        log_param_safe("epochs", EPOCHS)
+        log_param_safe("batch_size", BATCH)
+        log_param_safe("train_seed", TRAIN_SEED)
+
+        log_param_safe("date_fraction", DATE_FRACTION)
+        log_param_safe("date_pick_mode", DATE_PICK_MODE)
+        log_param_safe("date_seed", DATE_SEED)
+        log_param_safe("picked_date_start", picked_dates[0])
+        log_param_safe("picked_date_end", picked_dates[-1])
+        log_param_safe("picked_dates_count", len(picked_dates))
+        log_param_safe("picked_dates_hash", md5_list(picked_dates))
+
+        log_param_safe("services_list", ",".join(FIXED_ORDER))
+        log_param_safe("split_mode", split_mode)
+        log_param_safe("split_train_end_day", train_end_day)
+        log_param_safe("split_test_start_day", val_end_day)
+        log_param_safe("log_test_per_service", LOG_TEST_PER_SERVICE)
+        log_param_safe("min_p95_samples", MIN_P95_SAMPLES)
+
+        log_metric_safe("n_rows_loaded", n_rows_loaded, step=0)
+        log_metric_safe("rows_after_filter", rows_after_filter, step=0)
+        log_metric_safe("n_windows_total", total_windows, step=0)
+
+        set_global_seed(TRAIN_SEED)
+
+        X_tr_list, y_tr_list, S_tr_list = [], [], []
+        X_val_list, y_val_list, S_val_list, B_val_list = [], [], [], []
+        X_test_list, y_test_list, S_test_list, B_test_list = [], [], [], []
+
+        n_train_windows = 0
+        n_val_windows = 0
+        n_test_windows = 0
+
+        for svc_name, pack in svc_packs.items():
+            label_ns = pack["label_ns"]
+            target_ns = pack["target_ns"]
+            
+            tr_idx = np.where(target_ns < train_target_cut_ns)[0]
+            val_idx = np.where(
+                (label_ns >= train_end_ns) & (label_ns < val_end_ns) &
+                (target_ns < val_end_ns)
+            )[0]
+            test_idx = np.where(
+                (label_ns >= val_end_ns) &
+                (target_ns < data_end_ns)
+            )[0]
+            
+            if tr_idx.size < 10 or val_idx.size < 5 or test_idx.size < 5:
+                continue
+            
+            tr_idx = tr_idx[np.argsort(label_ns[tr_idx])]
+            val_idx = val_idx[np.argsort(label_ns[val_idx])]
+            test_idx = test_idx[np.argsort(label_ns[test_idx])]
+            
+            X_tr_list.append(pack["X"][tr_idx]); y_tr_list.append(pack["y"][tr_idx]); S_tr_list.append(pack["S"][tr_idx])
+            X_val_list.append(pack["X"][val_idx]); y_val_list.append(pack["y"][val_idx]); S_val_list.append(pack["S"][val_idx]); B_val_list.append(pack["B"][val_idx])
+            X_test_list.append(pack["X"][test_idx]); y_test_list.append(pack["y"][test_idx]); S_test_list.append(pack["S"][test_idx]); B_test_list.append(pack["B"][test_idx])
+            
+            n_train_windows += int(tr_idx.size)
+            n_val_windows += int(val_idx.size)
+            n_test_windows += int(test_idx.size)
+
+        if not X_tr_list or not X_val_list or not X_test_list:
+            print("[ERROR] Not enough data for train/val/test after split.", file=sys.stderr)
+            sys.exit(1)
+
+        X_tr = np.concatenate(X_tr_list, axis=0); y_tr = np.concatenate(y_tr_list, axis=0); S_tr = np.concatenate(S_tr_list, axis=0)
+        X_val = np.concatenate(X_val_list, axis=0); y_val = np.concatenate(y_val_list, axis=0); S_val = np.concatenate(S_val_list, axis=0); B_val = np.concatenate(B_val_list, axis=0)
+        X_test = np.concatenate(X_test_list, axis=0); y_test = np.concatenate(y_test_list, axis=0); S_test = np.concatenate(S_test_list, axis=0); B_test = np.concatenate(B_test_list, axis=0)
+
+        del X_tr_list, y_tr_list, S_tr_list, X_val_list, y_val_list, S_val_list, B_val_list, X_test_list, y_test_list, S_test_list, B_test_list
+        gc.collect()
+
+        log_metric_safe("n_windows_train", n_train_windows, step=0)
+        log_metric_safe("n_windows_val", n_val_windows, step=0)
+        log_metric_safe("n_windows_test", n_test_windows, step=0)
+
+        feat_norm = Normalization(axis=-1, name="feature_zscore_train")
+        feat_norm.adapt(X_tr)
+
+        model = build_model(feat_norm)
+        callbacks = [
+            EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-5),
+        ]
+
+        t0 = time.perf_counter()
+        hist = model.fit(
+            [X_tr, S_tr], y_tr,
+            validation_data=([X_val, S_val], y_val),
+            epochs=EPOCHS,
+            batch_size=BATCH,
+            shuffle=True,
+            callbacks=callbacks,
+            verbose=0
+        )
+        fit_s = float(time.perf_counter() - t0)
+        epochs_trained = int(len(hist.history.get("loss", [])) or 0)
+
+        log_metric_safe("final_fit_s", fit_s, step=200)
+        log_metric_safe("final_epochs_trained", epochs_trained, step=200)
+
+        # VAL metrics (RPS invert log1p if enabled)
+        y_val_pred = model.predict([X_val, S_val], verbose=0)
+
+        y_val_rps_true = inv_rps_transform(y_val[:, 0])
+        y_val_rps_pred = inv_rps_transform(y_val_pred[:, 0])
+
+        val_wape_rps = float(wape(y_val_rps_true, y_val_rps_pred))
+        val_mae_rps  = float(mean_absolute_error(y_val_rps_true, y_val_rps_pred))
+
+        log_metric_safe("val_wape_rps", val_wape_rps, step=210)
+        log_metric_safe("val_mae_rps",  val_mae_rps,  step=210)
+
+        # TEST metrics
+        y_test_pred = model.predict([X_test, S_test], verbose=0)
+
+        y_test_rps_true = inv_rps_transform(y_test[:, 0])
+        y_test_rps_pred = inv_rps_transform(y_test_pred[:, 0])
+
+        test_wape_rps = float(wape(y_test_rps_true, y_test_rps_pred))
+        test_mae_rps  = float(mean_absolute_error(y_test_rps_true, y_test_rps_pred))
+        test_mae_cpu  = float(mean_absolute_error(y_test[:, 1], y_test_pred[:, 1]))
+        test_mae_mem  = float(mean_absolute_error(y_test[:, 2], y_test_pred[:, 2]))
+
+        log_metric_safe("test_wape_rps", test_wape_rps, step=300)
+        log_metric_safe("test_mae_rps",  test_mae_rps,  step=300)
+        log_metric_safe("test_mae_cpu",  test_mae_cpu,  step=300)
+        log_metric_safe("test_mae_mem",  test_mae_mem,  step=300)
+
+        abs_err_rps = np.abs(y_test_rps_true.astype(np.float64) - y_test_rps_pred.astype(np.float64))
+        test_p95_abs_err_rps = float(np.percentile(abs_err_rps, 95))
+        test_under_rate_rps = float(np.mean(y_test_rps_pred < y_test_rps_true))
+
+        log_metric_safe("test_p95_abs_err_rps", test_p95_abs_err_rps, step=300)
+        log_metric_safe("test_under_rate_rps",  test_under_rate_rps,  step=300)
+
+        # Baseline on TEST (persistence on the SAME target space)
+        baseline_test_wape_rps = float(wape(y_test_rps_true, B_test[:, 0]))
+        improve_test_wape_rps  = float(baseline_test_wape_rps - test_wape_rps)
+
+        baseline_test_mae_cpu = float(mean_absolute_error(y_test[:, 1], B_test[:, 1]))
+        improve_test_mae_cpu  = float(baseline_test_mae_cpu - test_mae_cpu)
+
+        baseline_test_mae_mem = float(mean_absolute_error(y_test[:, 2], B_test[:, 2]))
+        improve_test_mae_mem  = float(baseline_test_mae_mem - test_mae_mem)
+
+        log_metric_safe("baseline_test_wape_rps", baseline_test_wape_rps, step=300)
+        log_metric_safe("improve_test_wape_rps",  improve_test_wape_rps,  step=300)
+        log_metric_safe("baseline_test_mae_cpu",  baseline_test_mae_cpu,  step=300)
+        log_metric_safe("improve_test_mae_cpu",   improve_test_mae_cpu,   step=300)
+        log_metric_safe("baseline_test_mae_mem",  baseline_test_mae_mem,  step=300)
+        log_metric_safe("improve_test_mae_mem",   improve_test_mae_mem,   step=300)
+
+        # per-service
+        def _svc_mask(S_arr: np.ndarray, svc_id: int) -> np.ndarray:
+            return (S_arr[:, 0].astype(int) == int(svc_id))
+
+        if LOG_TEST_PER_SERVICE:
+            for svc, sid in SERVICE_TO_ID.items():
+                m = _svc_mask(S_test, sid)
+                n_m = int(np.sum(m))
+                if n_m <= 0:
+                    continue
+
+                mae = float(mean_absolute_error(y_test_rps_true[m], y_test_rps_pred[m]))
+                log_metric_safe(f"test_mae_rps_{svc.replace('-', '_')}", mae, step=310)
+
+                if n_m >= MIN_P95_SAMPLES:
+                    abs_err = np.abs(y_test_rps_true[m].astype(np.float64) - y_test_rps_pred[m].astype(np.float64))
+                    p95 = float(np.percentile(abs_err, 95))
+                    log_metric_safe(f"test_p95_abs_err_rps_{svc.replace('-', '_')}", p95, step=310)
+
+        # Log artifacts + (optional) register
+        tmp_dir = "/tmp/mlflow_model"
+        try:
+            if os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir)
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            mlflow.keras.save_model(model, path=tmp_dir)
+            mlflow.log_artifacts(tmp_dir, artifact_path="model")
+
+            if REGISTER_MODEL:
+                model_uri = f"runs:/{run.info.run_id}/model"
+                try:
+                    reg = mlflow.register_model(model_uri=model_uri, name=MODEL_NAME)
+                    print(f"[INFO] Registered | name={MODEL_NAME} version={getattr(reg, 'version', 'n/a')}")
+                except Exception as e:
+                    print(f"[WARN] Register model failed: {e}")
+        finally:
+            try:
+                if os.path.exists(tmp_dir):
+                    shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+
+        tf.keras.backend.clear_session()
+        del model, feat_norm, hist, y_val_pred, y_test_pred
+        del X_tr, y_tr, S_tr, X_val, y_val, S_val, B_val, X_test, y_test, S_test, B_test
+        del y_val_rps_true, y_val_rps_pred, y_test_rps_true, y_test_rps_pred
+        gc.collect()
+
+    print(f"[DONE] {MODEL_NAME} | dates={n_dates} rows={n_rows_loaded} rows_after_filter={rows_after_filter} windows={total_windows}")
+

@@ -1,0 +1,118 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: train-lstm-smoothshift-cronjob
+  namespace: cronjob
+spec:
+  schedule: "0 */6 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+          serviceAccountName: register-model-sa
+          containers:
+            - name: train-lstm
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+                  set -o pipefail
+                  echo "[INFO] Start training (smooth-before-shift targets)..."
+                  python /app/train_lstm.py
+                  rc=$?
+                  echo "[INFO] Train exit code=${rc}"
+                  exit "${rc}"
+              env:
+                # --- S3 / MinIO ---
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_S3_ENDPOINT_URL
+                  value: "https://minio.voducanh.id.vn"
+                - name: MLFLOW_ARTIFACT_ROOT
+                  value: "s3://datalake/mlflow"
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: "s3://datalake/mlflow"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: SILVER_PREFIX
+                  value: "silver/metrics"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                # --- Timezone ---
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
+                # --- MLflow ---
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow.mlflow.svc.cluster.local:5000"
+
+                # --- Training Params ---
+                - name: WINDOW_SIZE
+                  value: "10"
+                - name: EPOCHS
+                  value: "20"
+                - name: BATCH_SIZE
+                  value: "128"
+                - name: HORIZON_MINUTES
+                  value: "5"
+
+                # --- Split 80/10/10 ---
+                - name: TRAIN_FRAC
+                  value: "0.80"
+                - name: VAL_FRAC
+                  value: "0.10"
+                - name: EXTRA_EMBARGO_MINUTES
+                  value: "0"
+
+                # --- FULL DATA MODE ---
+                - name: DATE_FRACTION
+                  value: "1.0"
+                - name: DATE_PICK_MODE
+                  value: "all"
+                - name: DATE_SEED
+                  value: "42"
+
+                # --- Target mode (Cách A) ---
+                - name: TARGET_MODE
+                  value: "smooth_before_shift"
+                - name: SMOOTH_WINDOW_MINUTES
+                  value: "5"
+                - name: TARGET_RPS_LOG1P
+                  value: "true"
+                - name: REGISTER_MODEL
+                  value: "false"
+
+                # --- MINIO credentials ---
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+                # --- Model / Experiment ---
+                - name: MODEL_NAME
+                  value: "lstm_forecast_smoothshift"
+                - name: EXPERIMENT_NAME
+                  value: "lstm_forecast_smoothshift"
+
+              volumeMounts:
+                - name: train-lstm-script
+                  mountPath: /app
+                  readOnly: true
+
+          volumes:
+            - name: train-lstm-script
+              configMap:
+                name: train-lstm-script-smoothshift

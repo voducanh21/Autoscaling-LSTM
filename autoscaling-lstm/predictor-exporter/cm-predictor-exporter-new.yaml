@@ -37,8 +37,14 @@ data:
     # MUST match training window size
     WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "10"))
 
+    # MUST match training input feature count
+    FEATURE_COUNT = int(os.getenv("FEATURE_COUNT", "13"))
+
     # allow override; default to APP_JOB
     SERVICE_NAME = os.getenv("SERVICE_NAME", APP_JOB)
+
+    # if predicted RPS is negative -> clamp to this floor
+    MIN_RPS_IF_NEG = float(os.getenv("MIN_RPS_IF_NEG", "0.07"))
 
     # ===== SERVICE → ID (MUST match train) =====
     SERVICE_TO_ID = {
@@ -64,8 +70,6 @@ data:
     MEM_LIMIT_BYTES = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1GiB
     APPS_NAMESPACE = os.getenv("APPS_NAMESPACE", "apps")
 
-    # === MODEL INPUT (MUST match train final_input_cols) ===
-    FEATURE_COUNT = 13
     buffer = deque(maxlen=WINDOW_SIZE)
 
     # =========================================================
@@ -77,13 +81,9 @@ data:
     g_pred_mem = Gauge("lstm_pred_mem", "Predicted Memory (norm) for next window", registry=REGISTRY)
     g_desired_replicas = Gauge("lstm_desired_replicas", "Desired replicas from LSTM forecast", registry=REGISTRY)
 
-    # Reuse HTTP connections (lower overhead)
     SESSION = requests.Session()
 
-    # -------------------------------
-    # SAFETY: never export negative/NaN/Inf predictions
-    # -------------------------------
-    def sanitize_nonneg(x, name="value") -> float:
+    def sanitize_nonneg(x) -> float:
         try:
             v = float(x)
             if math.isnan(v) or math.isinf(v):
@@ -94,10 +94,18 @@ data:
         except Exception:
             return 0.0
 
+    def sanitize_rps_min_if_neg(x) -> float:
+        try:
+            v = float(x)
+            if math.isnan(v) or math.isinf(v):
+                return 0.0
+            if v < 0.0:
+                return float(MIN_RPS_IF_NEG)
+            return v
+        except Exception:
+            return 0.0
+
     def prom_query_raw(query: str):
-        """
-        /api/v1/query -> returns list of result entries (vector)
-        """
         try:
             r = SESSION.get(
                 f"{PROM_URL}/api/v1/query",
@@ -113,9 +121,6 @@ data:
         return []
 
     def prom_query_scalar(query: str) -> float:
-        """
-        Return first scalar in vector response
-        """
         res = prom_query_raw(query)
         try:
             if res:
@@ -125,12 +130,6 @@ data:
         return 0.0
 
     def prom_query_by_name(query: str) -> dict:
-        """
-        Map __name__ -> value from vector response.
-        Works well with queries like:
-          {__name__=~"a|b", ...}
-          sum by(__name__) (...)
-        """
         out = {}
         res = prom_query_raw(query)
         for item in res:
@@ -149,16 +148,17 @@ data:
         return float(math.log1p(x))
 
     def get_replica_count(offset: str = "") -> float:
-        # count number of pods that have cpu series
-        # offset example: " offset 1m"
-        q = f'count(pod:cpu:usage1m{{namespace="{APPS_NAMESPACE}",pod=~"{APP_JOB}-.*"}}{offset})'
+        # robust: count distinct pods (not series)
+        q = (
+            f'count(count by(pod) (pod:cpu:usage1m{{namespace="{APPS_NAMESPACE}",pod=~"{APP_JOB}-.*"}}{offset}))'
+        )
         n = prom_query_scalar(q)
         if n < 1.0:
             return 1.0
         return n
 
     def get_current_features():
-        # --- Service-level metrics: fetch in 1 query ---
+        # --- Service-level metrics (recording rules) ---
         q_svc = (
             f'{{__name__=~"svc:qps:rate1m|svc:latency_p95_ms|'
             f'svc:rps_roll_mean_5m|svc:rps_roll_mean_15m|svc:rps_lag_1m",'
@@ -175,7 +175,7 @@ data:
         replicas_now = get_replica_count(offset="")
         replicas_lag = get_replica_count(offset=" offset 1m")
 
-        # --- CPU/MEM raw current (SUM across replicas): fetch in 1 query ---
+        # --- CPU/MEM SUM across replicas ---
         q_sum_now = (
             f'sum by(__name__) ({{__name__=~"pod:cpu:usage1m|pod:mem:usage",'
             f'namespace="{APPS_NAMESPACE}",pod=~"{APP_JOB}-.*"}})'
@@ -184,7 +184,6 @@ data:
         raw_cpu_sum = float(sums_now.get("pod:cpu:usage1m", 0.0))
         raw_mem_sum = float(sums_now.get("pod:mem:usage", 0.0))
 
-        # --- CPU/MEM raw lag 1m (SUM across replicas): fetch in 1 query ---
         q_sum_lag = (
             f'sum by(__name__) ({{__name__=~"pod:cpu:usage1m|pod:mem:usage",'
             f'namespace="{APPS_NAMESPACE}",pod=~"{APP_JOB}-.*"}} offset 1m)'
@@ -193,7 +192,7 @@ data:
         raw_cpu_lag_sum = float(sums_lag.get("pod:cpu:usage1m", 0.0))
         raw_mem_lag_sum = float(sums_lag.get("pod:mem:usage", 0.0))
 
-        # --- Convert SUM -> AVG per replica (match training when replicas=1) ---
+        # --- SUM -> AVG per replica ---
         raw_cpu = raw_cpu_sum / replicas_now
         raw_mem = raw_mem_sum / replicas_now
         raw_cpu_lag = raw_cpu_lag_sum / replicas_lag
@@ -206,11 +205,11 @@ data:
         cpu_lag_1m = (raw_cpu_lag / cpu_limit) if cpu_limit > 0 else cpu_norm
         mem_lag_1m = (raw_mem_lag / MEM_LIMIT_BYTES) if MEM_LIMIT_BYTES > 0 else mem_norm
 
-        # --- Time cyclical encoding (timezone-aligned) ---
+        # --- Time cyclical encoding ---
         if TZ is not None:
             now = datetime.now(TZ)
-            hour = float(now.hour)        # 0..23
-            dow  = float(now.weekday())   # 0..6 (Mon=0)
+            hour = float(now.hour)
+            dow  = float(now.weekday())  # Mon=0..Sun=6
         else:
             now = time.localtime()
             hour = float(now.tm_hour)
@@ -251,7 +250,6 @@ data:
             "mem_norm": mem_norm,
             "replicas_now": replicas_now,
         }
-
         return features, obs
 
     def call_model(window, service_ids_1xW):
@@ -261,11 +259,18 @@ data:
             r.raise_for_status()
             data = r.json()
 
-            # sanitize: never negative/NaN/Inf
-            rps_future = sanitize_nonneg(data.get("rps_future", 0.0), "rps_future")
-            cpu_future = sanitize_nonneg(data.get("cpu_future", 0.0), "cpu_future")
-            mem_future = sanitize_nonneg(data.get("mem_future", 0.0), "mem_future")
+            # accept both formats:
+            # A) {rps_future, cpu_future, mem_future, ...}
+            # B) {predictions:[{rps_future, cpu_future, mem_future}, ...]}
+            if "rps_future" in data:
+                row = data
+            else:
+                preds = data.get("predictions") or []
+                row = preds[0] if preds else {}
 
+            rps_future = sanitize_rps_min_if_neg(row.get("rps_future", 0.0))
+            cpu_future = sanitize_nonneg(row.get("cpu_future", 0.0))
+            mem_future = sanitize_nonneg(row.get("mem_future", 0.0))
             return (rps_future, cpu_future, mem_future)
         except Exception as e:
             print(f"[MODEL] call failed: {e}")
@@ -292,9 +297,9 @@ data:
 
             pred_rps, pred_cpu, pred_mem = call_model(window, service_ids)
 
-            pred_rps = sanitize_nonneg(pred_rps, "pred_rps")
-            pred_cpu = sanitize_nonneg(pred_cpu, "pred_cpu")
-            pred_mem = sanitize_nonneg(pred_mem, "pred_mem")
+            pred_rps = sanitize_rps_min_if_neg(pred_rps)
+            pred_cpu = sanitize_nonneg(pred_cpu)
+            pred_mem = sanitize_nonneg(pred_mem)
 
             desired = max(1, ceil(pred_rps / TARGET_RPS_PER_POD))
 
@@ -322,5 +327,6 @@ data:
         print(f"[INFO] TARGET_RPS_PER_POD={TARGET_RPS_PER_POD}")
         print(f"[INFO] TIMEZONE={TZ_NAME}")
         print(f"[INFO] INTERVAL_SECONDS={INTERVAL}")
+        print(f"[INFO] MIN_RPS_IF_NEG={MIN_RPS_IF_NEG}")
         start_http_server(EXPORT_PORT, registry=REGISTRY)
         loop()

@@ -6,11 +6,12 @@ metadata:
 data:
   main.py: |
     import os
+    import traceback
+    import numpy as np
+
     import mlflow
     import mlflow.keras
     from fastapi import FastAPI, HTTPException
-    import numpy as np
-    import traceback
 
     app = FastAPI(title="LSTM Forecast Serving API")
 
@@ -19,12 +20,26 @@ data:
         "MLFLOW_TRACKING_URI",
         "http://mlflow.mlflow.svc.cluster.local:5000"
     )
+
+    # Will be patched by register_model.py via ConfigMap lstm-config (key: MODEL_URI)
     MODEL_URI = os.getenv("MODEL_URI", "models:/lstm_forecast/Production")
 
     # MUST match training
     FEATURE_COUNT = int(os.getenv("FEATURE_COUNT", "13"))
+    WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "10"))
+
+    # MUST match training label transform
+    TARGET_RPS_LOG1P = os.getenv("TARGET_RPS_LOG1P", "true").lower() == "true"
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
+    def inv_rps_transform(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        if not TARGET_RPS_LOG1P:
+            return x.astype(np.float32)
+        y = np.expm1(x)
+        y = np.clip(y, 0.0, None)
+        return y.astype(np.float32)
 
     # ================= LOAD MODEL =================
     try:
@@ -42,8 +57,8 @@ data:
         """
         Expected payload:
         {
-          "timeseries": [[[...13 features...], ...]],   # (B, T, 13)
-          "service_id": [[0,0,0,...]]                   # (B, T)
+          "timeseries": [[[...FEATURE_COUNT...], ...]],   # (B, T, FEATURE_COUNT)
+          "service_id": [[0,0,0,...]]                     # (B, T)
         }
         """
         try:
@@ -55,20 +70,43 @@ data:
                     f"timeseries must be (B, T, {FEATURE_COUNT}), got {X.shape}"
                 )
 
+            if X.shape[1] != WINDOW_SIZE:
+                raise ValueError(
+                    f"T must equal WINDOW_SIZE={WINDOW_SIZE}, got T={X.shape[1]}"
+                )
+
             if S.ndim != 2 or S.shape[0] != X.shape[0] or S.shape[1] != X.shape[1]:
                 raise ValueError(
                     f"service_id must be (B, T) and match timeseries, got {S.shape}"
                 )
 
-            preds = model.predict([X, S], verbose=0)
-            preds = preds.reshape(-1).tolist()
+            y = model.predict([X, S], verbose=0)  # (B, 3)
+            if y.ndim != 2 or y.shape[1] != 3:
+                raise ValueError(f"model output must be (B, 3), got {y.shape}")
 
-            return {
-                "rps_future": preds[0],
-                "cpu_future": preds[1],
-                "mem_future": preds[2],
-                "predictions": preds
-            }
+            # Inverse transform for RPS only (if TARGET_RPS_LOG1P=true)
+            rps = inv_rps_transform(y[:, 0])
+            cpu = y[:, 1].astype(np.float32)
+            mem = y[:, 2].astype(np.float32)
+
+            results = []
+            for i in range(y.shape[0]):
+                results.append({
+                    "rps_future": float(rps[i]),
+                    "cpu_future": float(cpu[i]),
+                    "mem_future": float(mem[i]),
+                })
+
+            # Backward-friendly: if batch=1, also return top-level scalars
+            if len(results) == 1:
+                return {
+                    "rps_future": results[0]["rps_future"],
+                    "cpu_future": results[0]["cpu_future"],
+                    "mem_future": results[0]["mem_future"],
+                    "predictions": results,
+                }
+
+            return {"predictions": results}
 
         except Exception as e:
             traceback.print_exc()
@@ -95,7 +133,7 @@ spec:
         kubernetes.io/hostname: k3n-m03
       containers:
         - name: lstm-serving
-          image: ducanhvo/lstm-serving:latest
+          image: ducanhvo/cnn-lstm-serving:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -106,8 +144,19 @@ spec:
               value: "https://minio.voducanh.id.vn"
             - name: AWS_S3_ADDRESSING_STYLE
               value: "path"
+
+            # Match training assumptions
+            - name: FEATURE_COUNT
+              value: "13"
+            - name: WINDOW_SIZE
+              value: "10"
+            - name: TARGET_RPS_LOG1P
+              value: "true"
+
+            # Optional metadata
             - name: MODEL_NAME
               value: "lstm_forecast"
+
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -118,17 +167,21 @@ spec:
                 secretKeyRef:
                   name: minio-cred
                   key: AWS_SECRET_ACCESS_KEY
+
+            # Patched by register_model.py (ConfigMap: lstm-config / key: MODEL_URI)
             - name: MODEL_URI
               valueFrom:
                 configMapKeyRef:
                   name: lstm-config
                   key: MODEL_URI
+
           readinessProbe:
             httpGet:
               path: /
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+
           resources:
             requests:
               cpu: "200m"
@@ -136,10 +189,12 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+
           volumeMounts:
             - name: lstm-code
               mountPath: /app/main.py
               subPath: main.py
+
       volumes:
         - name: lstm-code
           configMap:

@@ -7,7 +7,7 @@ spec:
   scaleTargetRef:
     name: order-service
   minReplicaCount: 1
-  maxReplicaCount: 6
+  maxReplicaCount: 5
   pollingInterval: 30
   cooldownPeriod: 60
   advanced:

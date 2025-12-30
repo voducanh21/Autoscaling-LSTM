@@ -6,8 +6,8 @@ import datetime
 PROM_URL = "http://localhost:9090"  # sửa nếu Prometheus endpoint khác
 
 # ================== CẤU HÌNH THỜI GIAN TEST ==================
-START_ISO = "2025-12-11T13:56:26Z"   # startTime của load test
-DURATION_MINUTES = 60               # số phút export
+START_ISO = "2025-12-30T07:33:54Z"   # startTime của load test
+DURATION_MINUTES = 10               # số phút export
 # =============================================================
 
 STEP = "60s"  # mỗi phút 1 sample
@@ -21,7 +21,12 @@ METRICS = {
     "rps_all":  "svc:qps:rate1m",
     "sla":      "svc:sla_violation_1m",
     "replicas": "svc:replicas:available:1m",
-    "cpu":      "svc:cpu_usage_rate_1m",  # CPU theo SERVICE (cores/min)
+
+    # CPU tổng theo service (cores)
+    "cpu_total_cores": "svc:cpu_usage_rate_1m",
+
+    # CPU utilization % giống HPA (usage / requests * 100)
+    "cpu_util_hpa_pct": "100 * svc:cpu_usage_rate_1m / clamp_min(svc:cpu_requests, 0.001)",
 }
 
 # ===== LIST SERVICE HỢP LỆ (5 backend service) =====
@@ -91,7 +96,7 @@ def main():
 
             for ts, value in series.get("values", []):
                 ts = int(float(ts))
-                if value == "NaN":
+                if value in ("NaN", "+Inf", "-Inf"):
                     continue
 
                 key = (service, ts)
@@ -111,38 +116,45 @@ def main():
             "rps_all",
             "sla_violation_flag",
             "replicas",
-            "cpu_total",
+            "cpu_total_cores",
+            "cpu_util_hpa_pct",
         ])
 
-        for (service, ts), vals in sorted(rows.items(), key=lambda x: (x[0][1], x[0][0])):
-            ts_iso = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        for service in sorted(VALID_SERVICES):
+            ts_list = sorted([ts for (svc, ts) in rows.keys() if svc == service])
+            for ts in ts_list:
+                vals = rows.get((service, ts), {})
+                ts_iso = datetime.datetime.fromtimestamp(
+                    ts, tz=datetime.timezone.utc
+                ).isoformat().replace("+00:00", "Z")
 
-            p95_ms = vals.get("p95_ms", None)
-            rps_all = vals.get("rps_all", None)
-            sla_raw = vals.get("sla", 0.0)  # fallback
-            replicas = vals.get("replicas", None)
-            cpu = vals.get("cpu", None)
+                p95_ms = vals.get("p95_ms", None)
+                rps_all = vals.get("rps_all", None)
+                sla_raw = vals.get("sla", 0.0)  # fallback
+                replicas = vals.get("replicas", None)
+                cpu_total = vals.get("cpu_total_cores", None)
+                cpu_util = vals.get("cpu_util_hpa_pct", None)
 
-            # SLA flag: ưu tiên tính bằng p95 nếu có, không thì fallback sang metric sla
-            if p95_ms is not None:
-                sla_flag = 1 if float(p95_ms) > SLA_THRESHOLD_MS else 0
-            else:
-                sla_flag = 1 if float(sla_raw) > 0 else 0
+                # SLA flag: ưu tiên tính bằng p95 nếu có, không thì fallback sang metric sla
+                if p95_ms is not None:
+                    sla_flag = 1 if float(p95_ms) > SLA_THRESHOLD_MS else 0
+                else:
+                    sla_flag = 1 if float(sla_raw) > 0 else 0
 
-            w.writerow([
-                ts_iso,
-                service,
-                "" if p95_ms is None else p95_ms,
-                "" if rps_all is None else rps_all,
-                sla_flag,
-                "" if replicas is None else replicas,
-                "" if cpu is None else cpu,
-            ])
+                w.writerow([
+                    ts_iso,
+                    service,
+                    "" if p95_ms is None else p95_ms,
+                    "" if rps_all is None else rps_all,
+                    sla_flag,
+                    "" if replicas is None else replicas,
+                    "" if cpu_total is None else cpu_total,
+                    "" if cpu_util is None else cpu_util,
+                ])
 
     # ================== BUILD SUMMARY PER SERVICE ==================
     summary_rows = []
     for service in sorted(VALID_SERVICES):
-        # lấy tất cả timestamp của service đó
         service_points = [(ts, rows[(service, ts)]) for (svc, ts) in rows.keys() if svc == service]
         service_points.sort(key=lambda x: x[0])
 
@@ -151,7 +163,8 @@ def main():
         p95_vals = []
         rps_vals = []
         replicas_vals = []
-        cpu_vals = []
+        cpu_total_vals = []
+        cpu_util_vals = []
 
         for ts, vals in service_points:
             p95_ms = vals.get("p95_ms", None)
@@ -178,8 +191,10 @@ def main():
                 rps_vals.append(float(vals["rps_all"]))
             if vals.get("replicas") is not None:
                 replicas_vals.append(float(vals["replicas"]))
-            if vals.get("cpu") is not None:
-                cpu_vals.append(float(vals["cpu"]))
+            if vals.get("cpu_total_cores") is not None:
+                cpu_total_vals.append(float(vals["cpu_total_cores"]))
+            if vals.get("cpu_util_hpa_pct") is not None:
+                cpu_util_vals.append(float(vals["cpu_util_hpa_pct"]))
 
         violation_rate_pct = (100.0 * n_violate / n) if n > 0 else None
         compliance_pct = (100.0 - violation_rate_pct) if violation_rate_pct is not None else None
@@ -196,7 +211,8 @@ def main():
             "max_p95_ms": (max(p95_vals) if p95_vals else None),
             "avg_rps": mean(rps_vals),
             "avg_replicas": mean(replicas_vals),
-            "avg_cpu_total": mean(cpu_vals),
+            "avg_cpu_total_cores": mean(cpu_total_vals),
+            "avg_cpu_util_hpa_pct": mean(cpu_util_vals),
         })
 
     # ================== WRITE SUMMARY CSV ==================
@@ -215,7 +231,8 @@ def main():
                 "max_p95_ms",
                 "avg_rps",
                 "avg_replicas",
-                "avg_cpu_total",
+                "avg_cpu_total_cores",
+                "avg_cpu_util_hpa_pct",
             ],
         )
         w.writeheader()
