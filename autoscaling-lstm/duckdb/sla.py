@@ -6,8 +6,8 @@ import datetime
 PROM_URL = "http://localhost:9090"  # sửa nếu Prometheus endpoint khác
 
 # ================== CẤU HÌNH THỜI GIAN TEST ==================
-START_ISO = "2025-12-30T07:33:54Z"   # startTime của load test
-DURATION_MINUTES = 10               # số phút export
+START_ISO = "2026-01-02T06:11:15Z"   # startTime của load test
+DURATION_MINUTES = 60            # số phút export
 # =============================================================
 
 STEP = "60s"  # mỗi phút 1 sample

@@ -48,7 +48,7 @@ spec:
               value: "10"
 
             - name: TARGET_RPS_PER_POD
-              value: "175"
+              value: "150"
             - name: APP_JOB
               value: "product-service"
             - name: SERVICE_NAME

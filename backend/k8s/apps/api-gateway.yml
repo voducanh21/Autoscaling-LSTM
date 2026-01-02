@@ -23,6 +23,8 @@ spec:
           ports:
             - name: http
               containerPort: 8888
+            - name: management
+              containerPort: 9090
           resources:
             requests:
               cpu: "250m"
@@ -31,6 +33,26 @@ spec:
               cpu: "1000m"
               memory: "1Gi"
           env:
+            # Run actuator on separate management port
+            - name: MANAGEMENT_SERVER_PORT
+              value: "9090"
+
+            # Correct actuator base path property (NOT MANAGEMENT_SERVER_BASE_PATH)
+            - name: MANAGEMENT_ENDPOINTS_WEB_BASE_PATH
+              value: "/actuator"
+
+            # Expose required endpoints
+            - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+              value: "prometheus,health,info"
+
+            # Ensure prometheus endpoint is enabled
+            - name: MANAGEMENT_ENDPOINT_PROMETHEUS_ENABLED
+              value: "true"
+
+            # (optional safety) enable endpoints by default
+            - name: MANAGEMENT_ENDPOINTS_ENABLED_BY_DEFAULT
+              value: "true"
+
             - name: PRODUCT_SERVICE_URL
               valueFrom:
                 configMapKeyRef:
@@ -70,5 +92,5 @@ spec:
     - name: metrics
       protocol: TCP
       port: 9090
-      targetPort: 8888
+      targetPort: 9090
   type: ClusterIP

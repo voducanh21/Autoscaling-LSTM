@@ -52,7 +52,7 @@ spec:
               value: "10"
 
             - name: TARGET_RPS_PER_POD
-              value: "150"
+              value: "50"
             - name: APP_JOB
               value: "authentication-service"
             - name: SERVICE_NAME

@@ -12,8 +12,8 @@ REQUEST_TIMEOUT = int(os.getenv("PROM_TIMEOUT_SECONDS", "30"))
 # ============================================================
 # 2) TIME RANGE
 # ============================================================
-START_ISO = os.getenv("START_ISO", "2025-12-29T16:50:41Z")
-DURATION_MINUTES = int(os.getenv("DURATION_MINUTES", "180"))
+START_ISO = os.getenv("START_ISO", "2026-01-02T14:40:46Z")
+DURATION_MINUTES = int(os.getenv("DURATION_MINUTES", "60"))
 
 # Query + output sampling
 STEP = int(os.getenv("STEP_SECONDS", "60"))
