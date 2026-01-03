@@ -20,7 +20,7 @@ def _should_run_reference(ti) -> bool:
 with DAG(
         dag_id="train_cnn_lstm_dag",
         start_date=datetime(2025, 10, 20),
-        schedule="0 */6 * * *",
+        schedule=None,
         catchup=False,
         max_active_runs=1,
         tags=["mlflow", "train", "cnn-lstm"],
