@@ -1,7 +1,0 @@
-mode,service,total_cpu_requests_seconds,total_mem_requests_gib_seconds
-baseline_hpa,api-gateway,1320.0,1320.0
-baseline_hpa,authentication-service,549.0,915.0
-baseline_hpa,order-service,549.0,915.0
-baseline_hpa,payment-service,549.0,915.0
-baseline_hpa,product-service,1215.0,1215.0
-baseline_hpa,__TOTAL__,4182.0,5280.0

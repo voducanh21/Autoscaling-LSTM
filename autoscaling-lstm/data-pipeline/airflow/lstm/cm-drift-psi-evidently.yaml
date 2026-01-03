@@ -10,7 +10,7 @@ data:
     import pandas as pd
     import pyarrow.parquet as pq
     import s3fs
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
     from zoneinfo import ZoneInfo
 
     # =========================================================
@@ -31,21 +31,21 @@ data:
         ref_vals = np.asarray(ref_vals, dtype=np.float64)
         cur_vals = np.asarray(cur_vals, dtype=np.float64)
         bins = np.asarray(bins, dtype=np.float64)
-        
+
         ref_vals = ref_vals[np.isfinite(ref_vals)]
         cur_vals = cur_vals[np.isfinite(cur_vals)]
         if ref_vals.size == 0 or cur_vals.size == 0:
             return float("nan")
-        
+
         ref_hist, _ = np.histogram(ref_vals, bins=bins)
         cur_hist, _ = np.histogram(cur_vals, bins=bins)
-        
+
         ref_pct = ref_hist / max(1, ref_vals.size)
         cur_pct = cur_hist / max(1, cur_vals.size)
-        
+
         ref_pct = np.clip(ref_pct, eps, 1.0)
         cur_pct = np.clip(cur_pct, eps, 1.0)
-        
+
         return float(np.sum((ref_pct - cur_pct) * np.log(ref_pct / cur_pct)))
 
     def quantile_bins(x: np.ndarray, n_bins: int) -> np.ndarray:
@@ -53,13 +53,13 @@ data:
         x = x[np.isfinite(x)]
         if x.size < max(50, n_bins * 5):
             n_bins = max(5, min(n_bins, 10))
-        
+
         if x.size == 0:
             return np.array([-np.inf, np.inf], dtype=np.float64)
-        
+
         qs = np.linspace(0, 1, n_bins + 1)
         edges = np.quantile(x, qs)
-        
+
         edges = np.unique(edges)
         if edges.size < 3:
             lo = float(np.min(x))
@@ -67,7 +67,7 @@ data:
             if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
                 return np.array([-np.inf, np.inf], dtype=np.float64)
             edges = np.linspace(lo, hi, n_bins + 1)
-        
+
         edges[0] = -np.inf
         edges[-1] = np.inf
         return edges.astype(np.float64)
@@ -196,6 +196,18 @@ data:
         print(f"[ERROR] No current parquet under s3://{BUCKET}/{CURRENT_PREFIX}/date=*/service=*/*.parquet", file=sys.stderr)
         sys.exit(1)
 
+    # =========================================================
+    # Pick latest N calendar days (robust when missing partitions)
+    # =========================================================
+    def parse_date_part(s: str):
+        # support date=YYYY-MM-DD or date=YYYYMMDD
+        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except Exception:
+                pass
+        return None
+
     all_dates = set()
     for p in paths:
         try:
@@ -203,29 +215,54 @@ data:
             all_dates.add(d)
         except Exception:
             pass
-    dates_sorted = sorted(all_dates)
-    if not dates_sorted:
+
+    if not all_dates:
         print("[ERROR] Cannot parse current date partitions.", file=sys.stderr)
         sys.exit(1)
 
-    picked_dates = dates_sorted
-    if CURRENT_DATE_FRACTION and 0.0 < CURRENT_DATE_FRACTION < 1.0:
-        k = max(1, int(math.ceil(len(dates_sorted) * CURRENT_DATE_FRACTION)))
-        if CURRENT_PICK_MODE == "first":
-            picked_dates = dates_sorted[:k]
-        elif CURRENT_PICK_MODE == "hash":
-            rng = np.random.default_rng(CURRENT_SEED)
-            idx = np.sort(rng.choice(len(dates_sorted), size=k, replace=False))
-            picked_dates = sorted([dates_sorted[i] for i in idx])
-        else:
-            picked_dates = dates_sorted[-k:]
-    else:
-        if CURRENT_DAYS > 0:
-            picked_dates = dates_sorted[-min(CURRENT_DAYS, len(dates_sorted)):]
+    avail = []
+    for ds in all_dates:
+        dd = parse_date_part(ds)
+        if dd is not None:
+            avail.append((dd, ds))
 
+    if not avail:
+        print("[ERROR] Cannot parse current date partitions (unsupported format).", file=sys.stderr)
+        sys.exit(1)
+
+    avail.sort(key=lambda x: x[0])
+    avail_map = {dd: ds for dd, ds in avail}
+
+    if CURRENT_DAYS and CURRENT_DAYS > 0:
+        end_day = avail[-1][0]
+        start_day = end_day - timedelta(days=CURRENT_DAYS - 1)
+
+        wanted_days = [start_day + timedelta(days=i) for i in range(CURRENT_DAYS)]
+        picked_dates = [avail_map[d] for d in wanted_days if d in avail_map]
+
+        if not picked_dates:
+            picked_dates = [ds for _, ds in avail][-min(CURRENT_DAYS, len(avail)):]
+    else:
+        picked_dates = [ds for _, ds in avail]
+
+    picked_dates = sorted(picked_dates, key=lambda s: parse_date_part(s) or datetime.min.date())
     picked_set = set(picked_dates)
     picked_hash = md5_list(picked_dates)
-    print(f"[INFO] Current pick | dates={len(picked_dates)} start={picked_dates[0]} end={picked_dates[-1]} mode={CURRENT_PICK_MODE} days={CURRENT_DAYS} hash={picked_hash}")
+
+    if picked_dates:
+        print(
+            f"[INFO] Current pick | dates={len(picked_dates)} "
+            f"start={picked_dates[0]} end={picked_dates[-1]} "
+            f"mode=latest_calendar_days days={CURRENT_DAYS} hash={picked_hash}"
+        )
+        if CURRENT_DAYS and CURRENT_DAYS > 0 and len(picked_dates) < CURRENT_DAYS:
+            print(
+                f"[WARN] Missing {CURRENT_DAYS - len(picked_dates)} day partitions in the latest {CURRENT_DAYS} calendar days window.",
+                file=sys.stderr
+            )
+    else:
+        print("[ERROR] Picked dates is empty after selection.", file=sys.stderr)
+        sys.exit(1)
 
     # Current must have raw cols to build FEATURES
     need_cols = set()
@@ -311,19 +348,19 @@ data:
             ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
         if n_cur > n:
             cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
-        
+
         # only features
         ref_x = ref_s[FEATURES].reset_index(drop=True)
         cur_x = cur_s[FEATURES].reset_index(drop=True)
-        
+
         # build report: one ValueDrift per feature using PSI
         report = Report([ValueDrift(column=f, method="psi", threshold=str(PSI_THRESHOLD)) for f in FEATURES])
         my_eval = report.run(current_data=cur_x, reference_data=ref_x)
-        
+
         d = my_eval.dict()
         psi_map = {}
         drift_map = {}
-        
+
         # robust extraction: find ValueDrift metrics per column
         for m in d.get("metrics", []):
             metric_name = m.get("metric") or m.get("name") or m.get("metric_name")
@@ -333,38 +370,38 @@ data:
                 continue
             if "ValueDrift" not in str(metric_name):
                 continue
-            
+
             params = m.get("parameters") or m.get("params") or m.get("metric_args") or {}
             col = params.get("column") or m.get("column")
             res = m.get("result") or m.get("value") or {}
-            
+
             # best-effort keys
             drift_score = None
             for k in ["drift_score", "score", "psi", "psi_value", "value"]:
                 if k in res:
                     drift_score = res.get(k)
                     break
-            
+
             drift_detected = None
             for k in ["drift_detected", "detected", "drift"]:
                 if k in res:
                     drift_detected = res.get(k)
                     break
-            
+
             if col:
                 psi_map[col] = float(drift_score) if drift_score is not None and np.isfinite(drift_score) else float("nan")
                 drift_map[col] = bool(drift_detected) if drift_detected is not None else None
-        
+
         # save artifacts
         artifacts = {}
         if SAVE_EVIDENTLY:
             base_key = f"{EVIDENTLY_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}/service={svc}"
-            
+
             # snapshot json
             snap_key = f"{base_key}/evidently_snapshot.json"
             s3_write_bytes(snap_key, my_eval.json().encode("utf-8"))
             artifacts["evidently_snapshot_json"] = snap_key
-            
+
             # report html
             with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tf:
                 my_eval.save_html(tf.name)
@@ -373,7 +410,7 @@ data:
             html_key = f"{base_key}/evidently_report.html"
             s3_write_bytes(html_key, html_bytes)
             artifacts["evidently_report_html"] = html_key
-        
+
         return psi_map, drift_map, n, artifacts
 
     def compute_service_with_numpy(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
@@ -383,7 +420,7 @@ data:
             ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
         if n_cur > n:
             cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
-        
+
         psi_map = {}
         for feat in FEATURES:
             ref_vals = ref_s[feat].to_numpy(dtype=np.float64, copy=False)
@@ -401,7 +438,7 @@ data:
     for svc in FIXED_ORDER:
         ref_s = ref_df[ref_df["service"] == svc].dropna(subset=FEATURES)
         cur_s = cur_df[cur_df["service"] == svc].dropna(subset=FEATURES)
-        
+
         if ref_s.empty or cur_s.empty:
             results["per_service"][svc] = {
                 "error": "missing_ref_or_current",
@@ -409,7 +446,7 @@ data:
                 "cur_rows": int(len(cur_s))
             }
             continue
-        
+
         try:
             if EVIDENTLY_OK:
                 psi_map, drift_map, n_used, artifacts = compute_service_with_evidently(svc, ref_s, cur_s)
@@ -419,10 +456,10 @@ data:
             # if evidently fails at runtime, fallback
             print(f"[WARN] Evidently failed for svc={svc} -> fallback numpy. err={e}", file=sys.stderr)
             psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
-        
+
         svc_psi_vals = [v for v in psi_map.values() if np.isfinite(v)]
         svc_overall = float(np.mean(svc_psi_vals)) if svc_psi_vals else float("nan")
-        
+
         results["per_service"][svc] = {
             "ref_rows_used": int(min(len(ref_s), n_used)),
             "cur_rows_used": int(min(len(cur_s), n_used)),
@@ -430,10 +467,10 @@ data:
             "drift_detected": drift_map if drift_map else None,
             "psi_overall_mean": svc_overall,
         }
-        
+
         if artifacts:
             results["artifacts"][svc] = artifacts
-        
+
         for feat, v in psi_map.items():
             if np.isfinite(v):
                 agg_by_feat[feat].append(float(v))
