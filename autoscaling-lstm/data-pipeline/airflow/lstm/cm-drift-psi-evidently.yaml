@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: drift-psi-script
-  namespace: airflow
+  namespace: cronjob
 data:
   compute_psi.py: |
     import os, sys, math, json, hashlib, tempfile
@@ -25,7 +25,7 @@ data:
         EVIDENTLY_IMPORT_ERROR = str(e)
 
     # =========================================================
-    # Fallback PSI helpers (same as your current numpy version)
+    # PSI helpers (numpy - stable)
     # =========================================================
     def psi_from_bins(ref_vals: np.ndarray, cur_vals: np.ndarray, bins: np.ndarray, eps: float = 1e-6) -> float:
         ref_vals = np.asarray(ref_vals, dtype=np.float64)
@@ -96,13 +96,12 @@ data:
     REF_PREFIX = os.getenv("REF_PREFIX", "drift/reference")
     REF_TAG = os.getenv("REF_TAG", "").strip()
 
-    CURRENT_PREFIX = os.getenv("CURRENT_PREFIX", "drift/current/metrics")
+    CURRENT_PREFIX = os.getenv("CURRENT_PREFIX", "drift/current/metrics1")
 
     DEFAULT_FEATURES = ["rps_1m_log1p", "cpu_norm", "mem_norm"]
     FEATURES_ENV = os.getenv("PSI_FEATURES", "").strip()
     FEATURES = [x.strip() for x in FEATURES_ENV.split(",") if x.strip()] if FEATURES_ENV else DEFAULT_FEATURES
 
-    # For fallback numpy PSI only
     N_BINS = int(os.getenv("PSI_BINS", "10"))
     EPS = float(os.getenv("PSI_EPS", "1e-6"))
 
@@ -117,12 +116,10 @@ data:
     RUN_TAG = os.getenv("RUN_TAG", "").strip() or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     SAVE_LATEST_POINTER = os.getenv("SAVE_LATEST_POINTER", "true").lower() == "true"
 
-    # Gate retrain
     PSI_THRESHOLD = os.getenv("PSI_THRESHOLD", "").strip()
-    PSI_THRESHOLD = float(PSI_THRESHOLD) if PSI_THRESHOLD else 0.2  # default = 0.2
+    PSI_THRESHOLD = float(PSI_THRESHOLD) if PSI_THRESHOLD else 0.2
     GATE_MODE = os.getenv("GATE_MODE", "mean").lower()  # mean|max
 
-    # Save Evidently artifacts
     SAVE_EVIDENTLY = os.getenv("SAVE_EVIDENTLY", "true").lower() == "true"
     EVIDENTLY_PREFIX = os.getenv("EVIDENTLY_PREFIX", "drift/evidently")
 
@@ -197,10 +194,9 @@ data:
         sys.exit(1)
 
     # =========================================================
-    # Pick latest N calendar days (robust when missing partitions)
+    # Pick latest N calendar days
     # =========================================================
     def parse_date_part(s: str):
-        # support date=YYYY-MM-DD or date=YYYYMMDD
         for fmt in ("%Y-%m-%d", "%Y%m%d"):
             try:
                 return datetime.strptime(s, fmt).date()
@@ -256,10 +252,7 @@ data:
             f"mode=latest_calendar_days days={CURRENT_DAYS} hash={picked_hash}"
         )
         if CURRENT_DAYS and CURRENT_DAYS > 0 and len(picked_dates) < CURRENT_DAYS:
-            print(
-                f"[WARN] Missing {CURRENT_DAYS - len(picked_dates)} day partitions in the latest {CURRENT_DAYS} calendar days window.",
-                file=sys.stderr
-            )
+            print(f"[WARN] Missing {CURRENT_DAYS - len(picked_dates)} day partitions in the latest {CURRENT_DAYS} calendar days window.", file=sys.stderr)
     else:
         print("[ERROR] Picked dates is empty after selection.", file=sys.stderr)
         sys.exit(1)
@@ -307,13 +300,15 @@ data:
         cur_df["mem_norm"] = cur_df["mem_norm"].astype(np.float32)
 
     # =========================================================
-    # Compute PSI per-service per-feature (Evidently if available)
+    # Compute PSI per-service per-feature
+    # - If Evidently available: generate report artifacts (HTML/snapshot)
+    # - PSI numeric values: ALWAYS computed by numpy for stability
     # =========================================================
     results = {
         "model_name": MODEL_NAME,
         "run_tag": RUN_TAG,
         "created_at_utc": datetime.utcnow().isoformat() + "Z",
-        "method": "evidently_psi" if EVIDENTLY_OK else "numpy_psi_fallback",
+        "method": "evidently_report_numpy_psi" if EVIDENTLY_OK else "numpy_psi_fallback",
         "reference": {
             "ref_tag": meta.get("ref_tag"),
             "combined_ref_s3_key": meta.get("combined_ref_s3_key"),
@@ -340,7 +335,7 @@ data:
         "artifacts": {}
     }
 
-    def compute_service_with_evidently(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
+    def compute_service_with_evidently_report_and_numpy_psi(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
         # sample
         n_ref, n_cur = len(ref_s), len(cur_s)
         n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
@@ -353,63 +348,41 @@ data:
         ref_x = ref_s[FEATURES].reset_index(drop=True)
         cur_x = cur_s[FEATURES].reset_index(drop=True)
 
-        # build report: one ValueDrift per feature using PSI
-        report = Report([ValueDrift(column=f, method="psi", threshold=str(PSI_THRESHOLD)) for f in FEATURES])
-        my_eval = report.run(current_data=cur_x, reference_data=ref_x)
+        artifacts = {}
 
-        d = my_eval.dict()
+        # 1) Evidently report for audit (optional)
+        if EVIDENTLY_OK:
+            try:
+                report = Report([ValueDrift(column=f, method="psi", threshold=str(PSI_THRESHOLD)) for f in FEATURES])
+                my_eval = report.run(current_data=cur_x, reference_data=ref_x)
+
+                if SAVE_EVIDENTLY:
+                    base_key = f"{EVIDENTLY_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}/service={svc}"
+
+                    snap_key = f"{base_key}/evidently_snapshot.json"
+                    s3_write_bytes(snap_key, my_eval.json().encode("utf-8"))
+                    artifacts["evidently_snapshot_json"] = snap_key
+
+                    with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tf:
+                        my_eval.save_html(tf.name)
+                        tf.seek(0)
+                        html_bytes = tf.read()
+                    html_key = f"{base_key}/evidently_report.html"
+                    s3_write_bytes(html_key, html_bytes)
+                    artifacts["evidently_report_html"] = html_key
+            except Exception as e:
+                print(f"[WARN] Evidently report failed for svc={svc}. err={e}", file=sys.stderr)
+
+        # 2) PSI values computed by numpy (stable)
         psi_map = {}
         drift_map = {}
-
-        # robust extraction: find ValueDrift metrics per column
-        for m in d.get("metrics", []):
-            metric_name = m.get("metric") or m.get("name") or m.get("metric_name")
-            if isinstance(metric_name, dict):
-                metric_name = metric_name.get("name") or metric_name.get("type")
-            if metric_name is None:
-                continue
-            if "ValueDrift" not in str(metric_name):
-                continue
-
-            params = m.get("parameters") or m.get("params") or m.get("metric_args") or {}
-            col = params.get("column") or m.get("column")
-            res = m.get("result") or m.get("value") or {}
-
-            # best-effort keys
-            drift_score = None
-            for k in ["drift_score", "score", "psi", "psi_value", "value"]:
-                if k in res:
-                    drift_score = res.get(k)
-                    break
-
-            drift_detected = None
-            for k in ["drift_detected", "detected", "drift"]:
-                if k in res:
-                    drift_detected = res.get(k)
-                    break
-
-            if col:
-                psi_map[col] = float(drift_score) if drift_score is not None and np.isfinite(drift_score) else float("nan")
-                drift_map[col] = bool(drift_detected) if drift_detected is not None else None
-
-        # save artifacts
-        artifacts = {}
-        if SAVE_EVIDENTLY:
-            base_key = f"{EVIDENTLY_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}/service={svc}"
-
-            # snapshot json
-            snap_key = f"{base_key}/evidently_snapshot.json"
-            s3_write_bytes(snap_key, my_eval.json().encode("utf-8"))
-            artifacts["evidently_snapshot_json"] = snap_key
-
-            # report html
-            with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tf:
-                my_eval.save_html(tf.name)
-                tf.seek(0)
-                html_bytes = tf.read()
-            html_key = f"{base_key}/evidently_report.html"
-            s3_write_bytes(html_key, html_bytes)
-            artifacts["evidently_report_html"] = html_key
+        for feat in FEATURES:
+            ref_vals = ref_x[feat].to_numpy(dtype=np.float64, copy=False)
+            cur_vals = cur_x[feat].to_numpy(dtype=np.float64, copy=False)
+            bins = quantile_bins(ref_vals, N_BINS)
+            v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
+            psi_map[feat] = float(v)
+            drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
 
         return psi_map, drift_map, n, artifacts
 
@@ -422,18 +395,22 @@ data:
             cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
 
         psi_map = {}
+        drift_map = {}
         for feat in FEATURES:
             ref_vals = ref_s[feat].to_numpy(dtype=np.float64, copy=False)
             cur_vals = cur_s[feat].to_numpy(dtype=np.float64, copy=False)
             bins = quantile_bins(ref_vals, N_BINS)
-            psi_map[feat] = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
-        return psi_map, {}, n, {}
+            v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
+            psi_map[feat] = float(v)
+            drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
+
+        return psi_map, drift_map, n, {}
 
     agg_by_feat = {f: [] for f in FEATURES}
     svc_overall_list = []
 
     if not EVIDENTLY_OK:
-        print(f"[WARN] Evidently not available -> fallback numpy. import_error={EVIDENTLY_IMPORT_ERROR}", file=sys.stderr)
+        print(f"[WARN] Evidently not available -> numpy only. import_error={EVIDENTLY_IMPORT_ERROR}", file=sys.stderr)
 
     for svc in FIXED_ORDER:
         ref_s = ref_df[ref_df["service"] == svc].dropna(subset=FEATURES)
@@ -449,12 +426,11 @@ data:
 
         try:
             if EVIDENTLY_OK:
-                psi_map, drift_map, n_used, artifacts = compute_service_with_evidently(svc, ref_s, cur_s)
+                psi_map, drift_map, n_used, artifacts = compute_service_with_evidently_report_and_numpy_psi(svc, ref_s, cur_s)
             else:
                 psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
         except Exception as e:
-            # if evidently fails at runtime, fallback
-            print(f"[WARN] Evidently failed for svc={svc} -> fallback numpy. err={e}", file=sys.stderr)
+            print(f"[WARN] compute failed for svc={svc} -> fallback numpy. err={e}", file=sys.stderr)
             psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
 
         svc_psi_vals = [v for v in psi_map.values() if np.isfinite(v)]

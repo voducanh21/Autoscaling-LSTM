@@ -4,7 +4,7 @@ metadata:
   name: drift-psi-cronjob
   namespace: cronjob
 spec:
-  schedule: "0 */6 * * *"   # mỗi 6 tiếng (đổi tùy bạn)
+  schedule: "0 */6 * * *"
   suspend: true
   jobTemplate:
     spec:
@@ -25,7 +25,6 @@ spec:
                   python /app/compute_psi.py
                   echo "[INFO] PSI job done."
               env:
-                # --- S3 / MinIO ---
                 - name: S3_ENDPOINT
                   value: "https://minio.voducanh.id.vn"
                 - name: S3_BUCKET
@@ -33,17 +32,17 @@ spec:
                 - name: AWS_S3_ADDRESSING_STYLE
                   value: "path"
 
-                # --- Paths ---
+                # FIX: đúng model
                 - name: MODEL_NAME
-                  value: "cnn_lstm_forecast"
+                  value: "lstm_forecast"
+
                 - name: REF_PREFIX
                   value: "drift/reference"
                 - name: CURRENT_PREFIX
-                  value: "drift/current/metrics"
+                  value: "drift/current/metrics1"
                 - name: PSI_PREFIX
                   value: "drift/psi"
 
-                # --- Current selection ---
                 - name: CURRENT_DAYS
                   value: "7"
                 - name: CURRENT_PICK_MODE
@@ -51,7 +50,6 @@ spec:
                 - name: CURRENT_SEED
                   value: "42"
 
-                # --- PSI knobs ---
                 - name: PSI_BINS
                   value: "10"
                 - name: PSI_EPS
@@ -59,15 +57,9 @@ spec:
                 - name: MAX_SAMPLES_PER_SERVICE
                   value: "200000"
 
-                # --- Optional gating ---
-                # - name: PSI_THRESHOLD
-                #   value: "0.2"
-
-                # --- Timezone ---
                 - name: TIMEZONE
                   value: "Asia/Ho_Chi_Minh"
 
-                # --- MINIO credentials ---
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:
                     secretKeyRef:
@@ -83,7 +75,6 @@ spec:
                 - name: drift-psi-script
                   mountPath: /app
                   readOnly: true
-
           volumes:
             - name: drift-psi-script
               configMap:
