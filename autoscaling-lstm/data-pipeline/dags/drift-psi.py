@@ -72,11 +72,10 @@ fi
             "S3_BUCKET": "datalake",
             "AWS_S3_ADDRESSING_STYLE": "path",
 
-            # --- Model / drift paths (đổi cho đúng hệ bạn) ---
-            # Nếu bạn muốn retrain cnn_lstm_forecast thì để đúng model này
-            "MODEL_NAME": "cnn_lstm_forecast",
+            # --- DRIFT TARGET ---
+            "MODEL_NAME": "lstm_forecast",            # <-- drift cho lstm_forecast
             "REF_PREFIX": "drift/reference",
-            "CURRENT_PREFIX": "drift/current/metrics1",  # bạn nói current nằm metrics1
+            "CURRENT_PREFIX": "drift/current/metrics1",  # <-- current nằm metrics1
             "PSI_PREFIX": "drift/psi",
 
             # --- Current selection ---
@@ -96,7 +95,7 @@ fi
             # --- Timezone ---
             "TIMEZONE": "Asia/Ho_Chi_Minh",
 
-            # --- Evidently artifacts (nếu muốn) ---
+            # --- Evidently artifacts (optional) ---
             "SAVE_EVIDENTLY": "true",
             "EVIDENTLY_PREFIX": "drift/evidently",
         },
@@ -129,12 +128,13 @@ fi
         task_id="trigger_retrain_dag",
         trigger_dag_id=RETRAIN_DAG_ID,
         wait_for_completion=False,
-        reset_dag_run=False,  # không xoá run cũ; tạo run mới
+        reset_dag_run=False,
         conf={
             "reason": "psi_drift",
             "source_dag": "drift_psi",
             "ts": "{{ ts }}",
-            "psi_rc": "{{ ti.xcom_pull(task_ids='compute_psi')['rc'] }}",
+            "psi_rc": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('rc') }}",
+            "model_name": "lstm_forecast",
         },
     )
 
