@@ -1,4 +1,5 @@
 # dags/drift_psi_dag.py
+import json
 import pendulum
 from airflow import DAG
 from airflow.operators.python import ShortCircuitOperator
@@ -8,30 +9,54 @@ from kubernetes import client as k8s
 
 VN_TZ = pendulum.timezone("Asia/Ho_Chi_Minh")
 
-RETRAIN_DAG_ID = "train_cnn_lstm_dag"  # DAG retrain bạn muốn kích hoạt
+RETRAIN_DAG_ID = "train_lstm_forecast_dag"  # retrain DAG bạn muốn kích hoạt (đổi đúng DAG id của bạn)
 
 def _should_trigger_retrain(ti) -> bool:
     """
-    compute_psi sẽ push XCom {"drift": true/false, "rc": <int>}
-    trigger retrain chỉ chạy khi drift == True
+    compute_psi sẽ push XCom JSON qua /airflow/xcom/return.json
+    Ưu tiên key: retrain (mới). Fallback: drift (cũ).
     """
     x = ti.xcom_pull(task_ids="compute_psi")
-    try:
-        return bool((x or {}).get("drift", False))
-    except Exception:
+    print(f"[GATE] raw xcom = {x!r}")
+
+    if x in (None, "", "__airflow_xcom_result_empty__"):
+        print("[GATE] xcom empty -> False")
         return False
+
+    # KubernetesPodOperator có thể trả về string JSON
+    if isinstance(x, str):
+        try:
+            x = json.loads(x)
+            print(f"[GATE] parsed xcom = {x}")
+        except Exception as e:
+            print(f"[GATE] cannot parse xcom json: {e} -> False")
+            return False
+
+    if isinstance(x, dict):
+        if "retrain" in x:
+            v = bool(x.get("retrain", False))
+            print(f"[GATE] retrain={v}")
+            return v
+        if "drift" in x:
+            v = bool(x.get("drift", False))
+            print(f"[GATE] drift={v}")
+            return v
+
+    print("[GATE] unsupported xcom -> False")
+    return False
 
 
 with DAG(
         dag_id="drift_psi",
         start_date=pendulum.datetime(2025, 10, 20, tz=VN_TZ),
-        schedule="0 2 * * 1",  # 02:00 mỗi Thứ 2 (weekly)
+        schedule="0 2 * * 1",  # 02:00 mỗi Thứ 2
         catchup=False,
         max_active_runs=1,
         tags=["drift", "psi"],
 ) as dag:
 
-    # 1) Compute PSI (rc=2 => drift=true nhưng EXIT 0 để task không fail)
+    # 1) Compute PSI (KHÔNG dùng exit code để gate nữa)
+    # - compute_psi.py sẽ tự ghi /airflow/xcom/return.json với retrain=true/false và psi_overall...
     psi = KubernetesPodOperator(
         task_id="compute_psi",
         name="drift-psi",
@@ -43,26 +68,8 @@ with DAG(
             r"""
 set -e
 echo "[INFO] Start PSI job..."
-set +e
 python /app/compute_psi.py
-rc=$?
-set -e
-
-mkdir -p /airflow/xcom
-
-if [ "$rc" -eq 2 ]; then
-  echo "[INFO] PSI>=threshold (rc=2) -> drift=true"
-  echo '{"drift": true, "rc": 2}' > /airflow/xcom/return.json
-  exit 0
-elif [ "$rc" -eq 0 ]; then
-  echo "[INFO] PSI<threshold (rc=0) -> drift=false"
-  echo '{"drift": false, "rc": 0}' > /airflow/xcom/return.json
-  exit 0
-else
-  echo "[ERROR] PSI job failed rc=$rc"
-  echo '{"drift": null, "rc": '"$rc"'}' > /airflow/xcom/return.json
-  exit "$rc"
-fi
+echo "[INFO] PSI job done (compute_psi.py should write /airflow/xcom/return.json)"
 """
         ],
         do_xcom_push=True,
@@ -73,14 +80,13 @@ fi
             "AWS_S3_ADDRESSING_STYLE": "path",
 
             # --- DRIFT TARGET ---
-            "MODEL_NAME": "lstm_forecast",            # <-- drift cho lstm_forecast
+            "MODEL_NAME": "lstm_forecast",
             "REF_PREFIX": "drift/reference",
-            "CURRENT_PREFIX": "drift/current/metrics1",  # <-- current nằm metrics1
+            "CURRENT_PREFIX": "drift/current/metrics1",
             "PSI_PREFIX": "drift/psi",
 
             # --- Current selection ---
             "CURRENT_DAYS": "7",
-            "CURRENT_PICK_MODE": "last",
             "CURRENT_SEED": "42",
 
             # --- PSI knobs ---
@@ -90,7 +96,7 @@ fi
 
             # --- Gate threshold ---
             "PSI_THRESHOLD": "0.2",
-            "GATE_MODE": "mean",
+            "GATE_MODE": "mean",   # đổi "max" nếu muốn nhạy hơn
 
             # --- Timezone ---
             "TIMEZONE": "Asia/Ho_Chi_Minh",
@@ -117,7 +123,7 @@ fi
         in_cluster=True,
     )
 
-    # 2) Gate: chỉ trigger retrain khi drift=true
+    # 2) Gate: chỉ trigger retrain khi retrain/drift=true
     gate = ShortCircuitOperator(
         task_id="gate_retrain",
         python_callable=_should_trigger_retrain,
@@ -133,9 +139,16 @@ fi
             "reason": "psi_drift",
             "source_dag": "drift_psi",
             "ts": "{{ ts }}",
-            "psi_rc": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('rc') }}",
+            "xcom": "{{ ti.xcom_pull(task_ids='compute_psi') }}",
+            "psi_overall": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('psi_overall') }}",
+            "threshold": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('threshold') }}",
+            "gate_mode": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('gate_mode') }}",
+            "retrain": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('retrain') }}",
+            "run_tag": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('run_tag') }}",
+            "psi_s3_key": "{{ (ti.xcom_pull(task_ids='compute_psi') or {}).get('psi_s3_key') }}",
             "model_name": "lstm_forecast",
         },
+        trigger_rule="all_success",  # chỉ chạy khi gate=True (ShortCircuit sẽ skip downstream nếu False)
     )
 
     psi >> gate >> trigger_retrain

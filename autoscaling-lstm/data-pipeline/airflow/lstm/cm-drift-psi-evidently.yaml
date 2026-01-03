@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: drift-psi-script
-  namespace: cronjob
+  namespace: airflow
 data:
   compute_psi.py: |
     import os, sys, math, json, hashlib, tempfile
@@ -73,6 +73,18 @@ data:
         return edges.astype(np.float64)
 
     # =========================================================
+    # XCom helper (Airflow KubernetesPodOperator)
+    # =========================================================
+    def write_xcom(payload: dict):
+        try:
+            os.makedirs("/airflow/xcom", exist_ok=True)
+            with open("/airflow/xcom/return.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            # nếu không ghi được xcom thì vẫn không nên crash ở đây
+            pass
+
+    # =========================================================
     # ENV
     # =========================================================
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")
@@ -108,8 +120,6 @@ data:
     MAX_SAMPLES_PER_SERVICE = int(os.getenv("MAX_SAMPLES_PER_SERVICE", "200000"))
 
     CURRENT_DAYS = int(os.getenv("CURRENT_DAYS", "7"))
-    CURRENT_DATE_FRACTION = float(os.getenv("CURRENT_DATE_FRACTION", "0.0"))
-    CURRENT_PICK_MODE = os.getenv("CURRENT_PICK_MODE", "last").lower()
     CURRENT_SEED = int(os.getenv("CURRENT_SEED", "42"))
 
     PSI_PREFIX = os.getenv("PSI_PREFIX", "drift/psi")
@@ -147,347 +157,370 @@ data:
         with fs.open(f"{BUCKET}/{key}", "wb") as f:
             f.write(data)
 
-    # =========================================================
-    # Load reference meta
-    # =========================================================
-    if REF_TAG:
-        ref_base = f"{REF_PREFIX}/model={MODEL_NAME}/tag={REF_TAG}"
-        meta_key = f"{ref_base}/meta.json"
-        meta = s3_read_json(meta_key)
-    else:
-        latest_key = f"{REF_PREFIX}/model={MODEL_NAME}/latest.json"
-        meta = s3_read_json(latest_key)
-
-    ref_key = meta.get("combined_ref_s3_key") or meta.get("ref_s3_key")
-    per_service_keys = meta.get("per_service_ref_s3_keys") or {}
-
-    if not ref_key:
-        if isinstance(per_service_keys, dict) and per_service_keys:
-            ref_frames = []
-            for svc in FIXED_ORDER:
-                k = per_service_keys.get(svc)
-                if not k:
-                    continue
-                ref_frames.append(s3_read_parquet_df(k, columns=["service", "service_id"] + FEATURES))
-            if not ref_frames:
-                print("[ERROR] Reference meta has no combined_ref_s3_key and per_service_ref_s3_keys is empty.", file=sys.stderr)
-                sys.exit(1)
-            ref_df = pd.concat(ref_frames, ignore_index=True)
+    try:
+        # =========================================================
+        # Load reference meta
+        # =========================================================
+        if REF_TAG:
+            ref_base = f"{REF_PREFIX}/model={MODEL_NAME}/tag={REF_TAG}"
+            meta_key = f"{ref_base}/meta.json"
+            meta = s3_read_json(meta_key)
         else:
-            print("[ERROR] Reference meta missing combined_ref_s3_key/ref_s3_key and no per_service_ref_s3_keys.", file=sys.stderr)
+            latest_key = f"{REF_PREFIX}/model={MODEL_NAME}/latest.json"
+            meta = s3_read_json(latest_key)
+
+        ref_key = meta.get("combined_ref_s3_key") or meta.get("ref_s3_key")
+        per_service_keys = meta.get("per_service_ref_s3_keys") or {}
+
+        if not ref_key:
+            if isinstance(per_service_keys, dict) and per_service_keys:
+                ref_frames = []
+                for svc in FIXED_ORDER:
+                    k = per_service_keys.get(svc)
+                    if not k:
+                        continue
+                    ref_frames.append(s3_read_parquet_df(k, columns=["service", "service_id"] + FEATURES))
+                if not ref_frames:
+                    print("[ERROR] Reference meta has no combined_ref_s3_key and per_service_ref_s3_keys is empty.", file=sys.stderr)
+                    sys.exit(1)
+                ref_df = pd.concat(ref_frames, ignore_index=True)
+            else:
+                print("[ERROR] Reference meta missing combined_ref_s3_key/ref_s3_key and no per_service_ref_s3_keys.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            ref_df = s3_read_parquet_df(ref_key, columns=["service", "service_id"] + FEATURES)
+
+        rows_total = meta.get("rows_total", meta.get("rows"))
+        print(f"[INFO] Reference | model={MODEL_NAME} rows_total={rows_total} ref_tag={meta.get('ref_tag')}")
+
+        ref_df = ref_df.dropna(subset=["service"] + FEATURES).copy()
+
+        # =========================================================
+        # Load current parquet(s)
+        # =========================================================
+        cur_prefix = f"{BUCKET}/{CURRENT_PREFIX}/"
+        paths = fs.glob(cur_prefix + "date=*/service=*/*.parquet")
+        if not paths:
+            print(f"[ERROR] No current parquet under s3://{BUCKET}/{CURRENT_PREFIX}/date=*/service=*/*.parquet", file=sys.stderr)
             sys.exit(1)
-    else:
-        ref_df = s3_read_parquet_df(ref_key, columns=["service", "service_id"] + FEATURES)
 
-    rows_total = meta.get("rows_total", meta.get("rows"))
-    print(f"[INFO] Reference | model={MODEL_NAME} rows_total={rows_total} ref_tag={meta.get('ref_tag')}")
+        # =========================================================
+        # Pick latest N calendar days
+        # =========================================================
+        def parse_date_part(s: str):
+            for fmt in ("%Y-%m-%d", "%Y%m%d"):
+                try:
+                    return datetime.strptime(s, fmt).date()
+                except Exception:
+                    pass
+            return None
 
-    ref_df = ref_df.dropna(subset=["service"] + FEATURES).copy()
-
-    # =========================================================
-    # Load current parquet(s)
-    # =========================================================
-    cur_prefix = f"{BUCKET}/{CURRENT_PREFIX}/"
-    paths = fs.glob(cur_prefix + "date=*/service=*/*.parquet")
-    if not paths:
-        print(f"[ERROR] No current parquet under s3://{BUCKET}/{CURRENT_PREFIX}/date=*/service=*/*.parquet", file=sys.stderr)
-        sys.exit(1)
-
-    # =========================================================
-    # Pick latest N calendar days
-    # =========================================================
-    def parse_date_part(s: str):
-        for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        all_dates = set()
+        for p in paths:
             try:
-                return datetime.strptime(s, fmt).date()
+                d = p.split("/date=")[1].split("/")[0]
+                all_dates.add(d)
             except Exception:
                 pass
-        return None
 
-    all_dates = set()
-    for p in paths:
-        try:
-            d = p.split("/date=")[1].split("/")[0]
-            all_dates.add(d)
-        except Exception:
-            pass
+        if not all_dates:
+            print("[ERROR] Cannot parse current date partitions.", file=sys.stderr)
+            sys.exit(1)
 
-    if not all_dates:
-        print("[ERROR] Cannot parse current date partitions.", file=sys.stderr)
-        sys.exit(1)
+        avail = []
+        for ds in all_dates:
+            dd = parse_date_part(ds)
+            if dd is not None:
+                avail.append((dd, ds))
 
-    avail = []
-    for ds in all_dates:
-        dd = parse_date_part(ds)
-        if dd is not None:
-            avail.append((dd, ds))
+        if not avail:
+            print("[ERROR] Cannot parse current date partitions (unsupported format).", file=sys.stderr)
+            sys.exit(1)
 
-    if not avail:
-        print("[ERROR] Cannot parse current date partitions (unsupported format).", file=sys.stderr)
-        sys.exit(1)
+        avail.sort(key=lambda x: x[0])
+        avail_map = {dd: ds for dd, ds in avail}
 
-    avail.sort(key=lambda x: x[0])
-    avail_map = {dd: ds for dd, ds in avail}
+        if CURRENT_DAYS and CURRENT_DAYS > 0:
+            end_day = avail[-1][0]
+            start_day = end_day - timedelta(days=CURRENT_DAYS - 1)
+            wanted_days = [start_day + timedelta(days=i) for i in range(CURRENT_DAYS)]
+            picked_dates = [avail_map[d] for d in wanted_days if d in avail_map]
+            if not picked_dates:
+                picked_dates = [ds for _, ds in avail][-min(CURRENT_DAYS, len(avail)):]
+        else:
+            picked_dates = [ds for _, ds in avail]
 
-    if CURRENT_DAYS and CURRENT_DAYS > 0:
-        end_day = avail[-1][0]
-        start_day = end_day - timedelta(days=CURRENT_DAYS - 1)
+        picked_dates = sorted(picked_dates, key=lambda s: parse_date_part(s) or datetime.min.date())
+        picked_set = set(picked_dates)
+        picked_hash = md5_list(picked_dates)
 
-        wanted_days = [start_day + timedelta(days=i) for i in range(CURRENT_DAYS)]
-        picked_dates = [avail_map[d] for d in wanted_days if d in avail_map]
+        if picked_dates:
+            print(
+                f"[INFO] Current pick | dates={len(picked_dates)} "
+                f"start={picked_dates[0]} end={picked_dates[-1]} "
+                f"mode=latest_calendar_days days={CURRENT_DAYS} hash={picked_hash}"
+            )
+            if CURRENT_DAYS and CURRENT_DAYS > 0 and len(picked_dates) < CURRENT_DAYS:
+                print(f"[WARN] Missing {CURRENT_DAYS - len(picked_dates)} day partitions in the latest {CURRENT_DAYS} calendar days window.", file=sys.stderr)
+        else:
+            print("[ERROR] Picked dates is empty after selection.", file=sys.stderr)
+            sys.exit(1)
 
-        if not picked_dates:
-            picked_dates = [ds for _, ds in avail][-min(CURRENT_DAYS, len(avail)):]
-    else:
-        picked_dates = [ds for _, ds in avail]
+        # Current must have raw cols to build FEATURES
+        need_cols = set()
+        if "rps_1m_log1p" in FEATURES:
+            need_cols.add("rps_1m")
+        if "cpu_norm" in FEATURES:
+            need_cols.add("cpu_norm")
+        if "mem_norm" in FEATURES:
+            need_cols.add("mem_norm")
 
-    picked_dates = sorted(picked_dates, key=lambda s: parse_date_part(s) or datetime.min.date())
-    picked_set = set(picked_dates)
-    picked_hash = md5_list(picked_dates)
-
-    if picked_dates:
-        print(
-            f"[INFO] Current pick | dates={len(picked_dates)} "
-            f"start={picked_dates[0]} end={picked_dates[-1]} "
-            f"mode=latest_calendar_days days={CURRENT_DAYS} hash={picked_hash}"
-        )
-        if CURRENT_DAYS and CURRENT_DAYS > 0 and len(picked_dates) < CURRENT_DAYS:
-            print(f"[WARN] Missing {CURRENT_DAYS - len(picked_dates)} day partitions in the latest {CURRENT_DAYS} calendar days window.", file=sys.stderr)
-    else:
-        print("[ERROR] Picked dates is empty after selection.", file=sys.stderr)
-        sys.exit(1)
-
-    # Current must have raw cols to build FEATURES
-    need_cols = set()
-    if "rps_1m_log1p" in FEATURES:
-        need_cols.add("rps_1m")
-    if "cpu_norm" in FEATURES:
-        need_cols.add("cpu_norm")
-    if "mem_norm" in FEATURES:
-        need_cols.add("mem_norm")
-
-    cur_frames = []
-    for p in paths:
-        try:
-            date_part = p.split("/date=")[1].split("/")[0]
-            if date_part not in picked_set:
-                continue
-            svc = p.split("/service=")[1].split("/")[0]
-            if svc not in SERVICE_TO_ID:
-                continue
-            with fs.open(p, "rb") as f:
-                dfp = pq.read_table(f, columns=list(need_cols)).to_pandas()
-            dfp["service"] = svc
-            dfp["service_id"] = int(SERVICE_TO_ID[svc])
-            dfp["date_part"] = date_part
-            cur_frames.append(dfp)
-        except Exception:
-            continue
-
-    if not cur_frames:
-        print("[ERROR] No current rows after filtering by picked dates/services.", file=sys.stderr)
-        sys.exit(1)
-
-    cur_df = pd.concat(cur_frames, ignore_index=True).dropna(subset=["service"] + list(need_cols)).copy()
-
-    # Build features for current
-    if "rps_1m_log1p" in FEATURES:
-        rps = np.clip(cur_df["rps_1m"].astype(float).values, 0.0, None)
-        cur_df["rps_1m_log1p"] = np.log1p(rps).astype(np.float32)
-    if "cpu_norm" in FEATURES:
-        cur_df["cpu_norm"] = cur_df["cpu_norm"].astype(np.float32)
-    if "mem_norm" in FEATURES:
-        cur_df["mem_norm"] = cur_df["mem_norm"].astype(np.float32)
-
-    # =========================================================
-    # Compute PSI per-service per-feature
-    # - If Evidently available: generate report artifacts (HTML/snapshot)
-    # - PSI numeric values: ALWAYS computed by numpy for stability
-    # =========================================================
-    results = {
-        "model_name": MODEL_NAME,
-        "run_tag": RUN_TAG,
-        "created_at_utc": datetime.utcnow().isoformat() + "Z",
-        "method": "evidently_report_numpy_psi" if EVIDENTLY_OK else "numpy_psi_fallback",
-        "reference": {
-            "ref_tag": meta.get("ref_tag"),
-            "combined_ref_s3_key": meta.get("combined_ref_s3_key"),
-            "ref_s3_key_legacy": meta.get("ref_s3_key"),
-            "picked_dates_start": meta.get("picked_dates_start"),
-            "picked_dates_end": meta.get("picked_dates_end"),
-            "picked_dates_count": meta.get("picked_dates_count"),
-            "picked_dates_hash": meta.get("picked_dates_hash"),
-            "rows_total": meta.get("rows_total", meta.get("rows")),
-        },
-        "current": {
-            "prefix": CURRENT_PREFIX,
-            "picked_dates_start": picked_dates[0],
-            "picked_dates_end": picked_dates[-1],
-            "picked_dates_count": len(picked_dates),
-            "picked_dates_hash": picked_hash,
-        },
-        "features": FEATURES,
-        "psi_threshold": PSI_THRESHOLD,
-        "gate_mode": GATE_MODE,
-        "max_samples_per_service": MAX_SAMPLES_PER_SERVICE,
-        "per_service": {},
-        "aggregate": {},
-        "artifacts": {}
-    }
-
-    def compute_service_with_evidently_report_and_numpy_psi(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
-        # sample
-        n_ref, n_cur = len(ref_s), len(cur_s)
-        n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
-        if n_ref > n:
-            ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
-        if n_cur > n:
-            cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
-
-        # only features
-        ref_x = ref_s[FEATURES].reset_index(drop=True)
-        cur_x = cur_s[FEATURES].reset_index(drop=True)
-
-        artifacts = {}
-
-        # 1) Evidently report for audit (optional)
-        if EVIDENTLY_OK:
+        cur_frames = []
+        for p in paths:
             try:
-                report = Report([ValueDrift(column=f, method="psi", threshold=str(PSI_THRESHOLD)) for f in FEATURES])
-                my_eval = report.run(current_data=cur_x, reference_data=ref_x)
+                date_part = p.split("/date=")[1].split("/")[0]
+                if date_part not in picked_set:
+                    continue
+                svc = p.split("/service=")[1].split("/")[0]
+                if svc not in SERVICE_TO_ID:
+                    continue
+                with fs.open(p, "rb") as f:
+                    dfp = pq.read_table(f, columns=list(need_cols)).to_pandas()
+                dfp["service"] = svc
+                dfp["service_id"] = int(SERVICE_TO_ID[svc])
+                dfp["date_part"] = date_part
+                cur_frames.append(dfp)
+            except Exception:
+                continue
 
-                if SAVE_EVIDENTLY:
-                    base_key = f"{EVIDENTLY_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}/service={svc}"
+        if not cur_frames:
+            print("[ERROR] No current rows after filtering by picked dates/services.", file=sys.stderr)
+            sys.exit(1)
 
-                    snap_key = f"{base_key}/evidently_snapshot.json"
-                    s3_write_bytes(snap_key, my_eval.json().encode("utf-8"))
-                    artifacts["evidently_snapshot_json"] = snap_key
+        cur_df = pd.concat(cur_frames, ignore_index=True).dropna(subset=["service"] + list(need_cols)).copy()
 
-                    with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tf:
-                        my_eval.save_html(tf.name)
-                        tf.seek(0)
-                        html_bytes = tf.read()
-                    html_key = f"{base_key}/evidently_report.html"
-                    s3_write_bytes(html_key, html_bytes)
-                    artifacts["evidently_report_html"] = html_key
-            except Exception as e:
-                print(f"[WARN] Evidently report failed for svc={svc}. err={e}", file=sys.stderr)
+        # Build features for current
+        if "rps_1m_log1p" in FEATURES:
+            rps = np.clip(cur_df["rps_1m"].astype(float).values, 0.0, None)
+            cur_df["rps_1m_log1p"] = np.log1p(rps).astype(np.float32)
+        if "cpu_norm" in FEATURES:
+            cur_df["cpu_norm"] = cur_df["cpu_norm"].astype(np.float32)
+        if "mem_norm" in FEATURES:
+            cur_df["mem_norm"] = cur_df["mem_norm"].astype(np.float32)
 
-        # 2) PSI values computed by numpy (stable)
-        psi_map = {}
-        drift_map = {}
-        for feat in FEATURES:
-            ref_vals = ref_x[feat].to_numpy(dtype=np.float64, copy=False)
-            cur_vals = cur_x[feat].to_numpy(dtype=np.float64, copy=False)
-            bins = quantile_bins(ref_vals, N_BINS)
-            v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
-            psi_map[feat] = float(v)
-            drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
-
-        return psi_map, drift_map, n, artifacts
-
-    def compute_service_with_numpy(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
-        n_ref, n_cur = len(ref_s), len(cur_s)
-        n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
-        if n_ref > n:
-            ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
-        if n_cur > n:
-            cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
-
-        psi_map = {}
-        drift_map = {}
-        for feat in FEATURES:
-            ref_vals = ref_s[feat].to_numpy(dtype=np.float64, copy=False)
-            cur_vals = cur_s[feat].to_numpy(dtype=np.float64, copy=False)
-            bins = quantile_bins(ref_vals, N_BINS)
-            v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
-            psi_map[feat] = float(v)
-            drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
-
-        return psi_map, drift_map, n, {}
-
-    agg_by_feat = {f: [] for f in FEATURES}
-    svc_overall_list = []
-
-    if not EVIDENTLY_OK:
-        print(f"[WARN] Evidently not available -> numpy only. import_error={EVIDENTLY_IMPORT_ERROR}", file=sys.stderr)
-
-    for svc in FIXED_ORDER:
-        ref_s = ref_df[ref_df["service"] == svc].dropna(subset=FEATURES)
-        cur_s = cur_df[cur_df["service"] == svc].dropna(subset=FEATURES)
-
-        if ref_s.empty or cur_s.empty:
-            results["per_service"][svc] = {
-                "error": "missing_ref_or_current",
-                "ref_rows": int(len(ref_s)),
-                "cur_rows": int(len(cur_s))
-            }
-            continue
-
-        try:
-            if EVIDENTLY_OK:
-                psi_map, drift_map, n_used, artifacts = compute_service_with_evidently_report_and_numpy_psi(svc, ref_s, cur_s)
-            else:
-                psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
-        except Exception as e:
-            print(f"[WARN] compute failed for svc={svc} -> fallback numpy. err={e}", file=sys.stderr)
-            psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
-
-        svc_psi_vals = [v for v in psi_map.values() if np.isfinite(v)]
-        svc_overall = float(np.mean(svc_psi_vals)) if svc_psi_vals else float("nan")
-
-        results["per_service"][svc] = {
-            "ref_rows_used": int(min(len(ref_s), n_used)),
-            "cur_rows_used": int(min(len(cur_s), n_used)),
-            "psi": {k: float(v) for k, v in psi_map.items()},
-            "drift_detected": drift_map if drift_map else None,
-            "psi_overall_mean": svc_overall,
+        # =========================================================
+        # Compute PSI per-service per-feature
+        # =========================================================
+        results = {
+            "model_name": MODEL_NAME,
+            "run_tag": RUN_TAG,
+            "created_at_utc": datetime.utcnow().isoformat() + "Z",
+            "method": "evidently_report_numpy_psi" if EVIDENTLY_OK else "numpy_psi_fallback",
+            "reference": {
+                "ref_tag": meta.get("ref_tag"),
+                "combined_ref_s3_key": meta.get("combined_ref_s3_key"),
+                "ref_s3_key_legacy": meta.get("ref_s3_key"),
+                "picked_dates_start": meta.get("picked_dates_start"),
+                "picked_dates_end": meta.get("picked_dates_end"),
+                "picked_dates_count": meta.get("picked_dates_count"),
+                "picked_dates_hash": meta.get("picked_dates_hash"),
+                "rows_total": meta.get("rows_total", meta.get("rows")),
+            },
+            "current": {
+                "prefix": CURRENT_PREFIX,
+                "picked_dates_start": picked_dates[0],
+                "picked_dates_end": picked_dates[-1],
+                "picked_dates_count": len(picked_dates),
+                "picked_dates_hash": picked_hash,
+            },
+            "features": FEATURES,
+            "psi_threshold": PSI_THRESHOLD,
+            "gate_mode": GATE_MODE,
+            "max_samples_per_service": MAX_SAMPLES_PER_SERVICE,
+            "per_service": {},
+            "aggregate": {},
+            "artifacts": {}
         }
 
-        if artifacts:
-            results["artifacts"][svc] = artifacts
+        def compute_service_with_evidently_report_and_numpy_psi(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
+            n_ref, n_cur = len(ref_s), len(cur_s)
+            n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
+            if n_ref > n:
+                ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
+            if n_cur > n:
+                cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
 
-        for feat, v in psi_map.items():
-            if np.isfinite(v):
-                agg_by_feat[feat].append(float(v))
-        if np.isfinite(svc_overall):
-            svc_overall_list.append(svc_overall)
+            ref_x = ref_s[FEATURES].reset_index(drop=True)
+            cur_x = cur_s[FEATURES].reset_index(drop=True)
 
-    results["aggregate"]["psi_mean_by_feature"] = {
-        k: (float(np.mean(v)) if v else float("nan")) for k, v in agg_by_feat.items()
-    }
-    results["aggregate"]["psi_overall_mean_services"] = float(np.mean(svc_overall_list)) if svc_overall_list else float("nan")
-    results["aggregate"]["psi_overall_max_services"] = float(np.max(svc_overall_list)) if svc_overall_list else float("nan")
+            artifacts = {}
 
-    print("[INFO] PSI aggregate:", json.dumps(results["aggregate"], ensure_ascii=False))
+            # Evidently report (optional)
+            if EVIDENTLY_OK:
+                try:
+                    report = Report([ValueDrift(column=f, method="psi", threshold=PSI_THRESHOLD) for f in FEATURES])
+                    my_eval = report.run(current_data=cur_x, reference_data=ref_x)
 
-    # =========================================================
-    # Save to S3 (psi.json + latest)
-    # =========================================================
-    base_key = f"{PSI_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}"
-    out_key = f"{base_key}/psi.json"
-    latest_key = f"{PSI_PREFIX}/model={MODEL_NAME}/latest.json"
+                    if SAVE_EVIDENTLY:
+                        base_key = f"{EVIDENTLY_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}/service={svc}"
 
-    payload = json.dumps(results, ensure_ascii=False, indent=2).encode("utf-8")
-    s3_write_bytes(out_key, payload)
+                        snap_key = f"{base_key}/evidently_snapshot.json"
+                        s3_write_bytes(snap_key, my_eval.json().encode("utf-8"))
+                        artifacts["evidently_snapshot_json"] = snap_key
 
-    if SAVE_LATEST_POINTER:
-        s3_write_bytes(latest_key, payload)
+                        with tempfile.NamedTemporaryFile(suffix=".html", delete=True) as tf:
+                            my_eval.save_html(tf.name)
+                            tf.seek(0)
+                            html_bytes = tf.read()
+                        html_key = f"{base_key}/evidently_report.html"
+                        s3_write_bytes(html_key, html_bytes)
+                        artifacts["evidently_report_html"] = html_key
+                except Exception as e:
+                    print(f"[WARN] Evidently report failed for svc={svc}. err={e}", file=sys.stderr)
 
-    print(f"[DONE] Saved PSI | s3://{BUCKET}/{out_key}")
-    if SAVE_LATEST_POINTER:
-        print(f"[DONE] Updated latest | s3://{BUCKET}/{latest_key}")
+            # PSI numeric by numpy
+            psi_map = {}
+            drift_map = {}
+            for feat in FEATURES:
+                ref_vals = ref_x[feat].to_numpy(dtype=np.float64, copy=False)
+                cur_vals = cur_x[feat].to_numpy(dtype=np.float64, copy=False)
+                bins = quantile_bins(ref_vals, N_BINS)
+                v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
+                psi_map[feat] = float(v)
+                drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
 
-    # =========================================================
-    # Threshold gating (exit 2 to trigger retrain)
-    # =========================================================
-    if GATE_MODE == "max":
-        overall = results["aggregate"]["psi_overall_max_services"]
-    else:
-        overall = results["aggregate"]["psi_overall_mean_services"]
+            return psi_map, drift_map, n, artifacts
 
-    if np.isfinite(overall) and overall >= PSI_THRESHOLD:
-        print(f"[ALERT] PSI overall({GATE_MODE}) {overall:.6f} >= threshold {PSI_THRESHOLD:.6f}", file=sys.stderr)
-        sys.exit(2)
+        def compute_service_with_numpy(svc: str, ref_s: pd.DataFrame, cur_s: pd.DataFrame):
+            n_ref, n_cur = len(ref_s), len(cur_s)
+            n = min(n_ref, n_cur, MAX_SAMPLES_PER_SERVICE)
+            if n_ref > n:
+                ref_s = ref_s.sample(n=n, random_state=CURRENT_SEED)
+            if n_cur > n:
+                cur_s = cur_s.sample(n=n, random_state=CURRENT_SEED)
 
-    sys.exit(0)
+            psi_map = {}
+            drift_map = {}
+            for feat in FEATURES:
+                ref_vals = ref_s[feat].to_numpy(dtype=np.float64, copy=False)
+                cur_vals = cur_s[feat].to_numpy(dtype=np.float64, copy=False)
+                bins = quantile_bins(ref_vals, N_BINS)
+                v = psi_from_bins(ref_vals, cur_vals, bins=bins, eps=EPS)
+                psi_map[feat] = float(v)
+                drift_map[feat] = bool(np.isfinite(v) and v >= PSI_THRESHOLD)
+
+            return psi_map, drift_map, n, {}
+
+        agg_by_feat = {f: [] for f in FEATURES}
+        svc_overall_list = []
+
+        if not EVIDENTLY_OK:
+            print(f"[WARN] Evidently not available -> numpy only. import_error={EVIDENTLY_IMPORT_ERROR}", file=sys.stderr)
+
+        for svc in FIXED_ORDER:
+            ref_s = ref_df[ref_df["service"] == svc].dropna(subset=FEATURES)
+            cur_s = cur_df[cur_df["service"] == svc].dropna(subset=FEATURES)
+
+            if ref_s.empty or cur_s.empty:
+                results["per_service"][svc] = {
+                    "error": "missing_ref_or_current",
+                    "ref_rows": int(len(ref_s)),
+                    "cur_rows": int(len(cur_s))
+                }
+                continue
+
+            try:
+                if EVIDENTLY_OK:
+                    psi_map, drift_map, n_used, artifacts = compute_service_with_evidently_report_and_numpy_psi(svc, ref_s, cur_s)
+                else:
+                    psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
+            except Exception as e:
+                print(f"[WARN] compute failed for svc={svc} -> fallback numpy. err={e}", file=sys.stderr)
+                psi_map, drift_map, n_used, artifacts = compute_service_with_numpy(svc, ref_s, cur_s)
+
+            svc_psi_vals = [v for v in psi_map.values() if np.isfinite(v)]
+            svc_overall = float(np.mean(svc_psi_vals)) if svc_psi_vals else float("nan")
+
+            results["per_service"][svc] = {
+                "ref_rows_used": int(min(len(ref_s), n_used)),
+                "cur_rows_used": int(min(len(cur_s), n_used)),
+                "psi": {k: float(v) for k, v in psi_map.items()},
+                "drift_detected": drift_map if drift_map else None,
+                "psi_overall_mean": svc_overall,
+            }
+
+            if artifacts:
+                results["artifacts"][svc] = artifacts
+
+            for feat, v in psi_map.items():
+                if np.isfinite(v):
+                    agg_by_feat[feat].append(float(v))
+            if np.isfinite(svc_overall):
+                svc_overall_list.append(svc_overall)
+
+        results["aggregate"]["psi_mean_by_feature"] = {
+            k: (float(np.mean(v)) if v else float("nan")) for k, v in agg_by_feat.items()
+        }
+        results["aggregate"]["psi_overall_mean_services"] = float(np.mean(svc_overall_list)) if svc_overall_list else float("nan")
+        results["aggregate"]["psi_overall_max_services"] = float(np.max(svc_overall_list)) if svc_overall_list else float("nan")
+
+        print("[INFO] PSI aggregate:", json.dumps(results["aggregate"], ensure_ascii=False))
+
+        # =========================================================
+        # Save to S3 (psi.json + latest)
+        # =========================================================
+        base_key = f"{PSI_PREFIX}/model={MODEL_NAME}/run={RUN_TAG}"
+        out_key = f"{base_key}/psi.json"
+        latest_key = f"{PSI_PREFIX}/model={MODEL_NAME}/latest.json"
+
+        payload_bytes = json.dumps(results, ensure_ascii=False, indent=2).encode("utf-8")
+        s3_write_bytes(out_key, payload_bytes)
+        if SAVE_LATEST_POINTER:
+            s3_write_bytes(latest_key, payload_bytes)
+
+        print(f"[DONE] Saved PSI | s3://{BUCKET}/{out_key}")
+        if SAVE_LATEST_POINTER:
+            print(f"[DONE] Updated latest | s3://{BUCKET}/{latest_key}")
+
+        # =========================================================
+        # Gating result (NO FAIL on PSI>threshold)
+        # =========================================================
+        if GATE_MODE == "max":
+            overall = results["aggregate"]["psi_overall_max_services"]
+        else:
+            overall = results["aggregate"]["psi_overall_mean_services"]
+
+        if not np.isfinite(overall):
+            print("[ERROR] PSI overall is not finite (nan/inf). Treat as error.", file=sys.stderr)
+            sys.exit(1)
+
+        retrain = bool(overall >= PSI_THRESHOLD)
+        results["gate"] = {
+            "overall": float(overall),
+            "mode": GATE_MODE,
+            "threshold": float(PSI_THRESHOLD),
+            "retrain": retrain,
+        }
+
+        # XCom for ShortCircuitOperator / downstream
+        write_xcom({
+            "retrain": retrain,
+            "psi_overall": float(overall),
+            "threshold": float(PSI_THRESHOLD),
+            "gate_mode": GATE_MODE,
+            "model_name": MODEL_NAME,
+            "run_tag": RUN_TAG,
+            "psi_s3_key": out_key,
+            "latest_s3_key": (latest_key if SAVE_LATEST_POINTER else None),
+        })
+
+        if retrain:
+            print(f"[ALERT] PSI overall({GATE_MODE}) {overall:.6f} >= threshold {PSI_THRESHOLD:.6f} -> retrain=true")
+        else:
+            print(f"[OK] PSI overall({GATE_MODE}) {overall:.6f} < threshold {PSI_THRESHOLD:.6f} -> retrain=false")
+
+        sys.exit(0)
+
+    except Exception as e:
+        print(f"[ERROR] compute_psi crashed: {e}", file=sys.stderr)
+        sys.exit(1)
