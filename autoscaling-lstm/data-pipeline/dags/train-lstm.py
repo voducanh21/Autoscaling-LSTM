@@ -1,3 +1,7 @@
+# ================================
+# DAG: train_lstm_forecast_dag.py
+# (UNCHANGED logic; already runs December-only via TRAIN_MONTH/TRAIN_YEAR)
+# ================================
 from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import ShortCircuitOperator
@@ -22,7 +26,6 @@ with DAG(
         tags=["mlflow", "train", "lstm"],
 ) as dag:
 
-    # 1) TRAIN (không cần RBAC cross-namespace)
     train = KubernetesPodOperator(
         task_id="train_model",
         name="train-lstm-forecast",
@@ -44,27 +47,20 @@ with DAG(
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
-
             "MLFLOW_TRACKING_URI": "http://mlflow.mlflow.svc.cluster.local:5000",
-
             "WINDOW_SIZE": "10",
             "EPOCHS": "20",
             "BATCH_SIZE": "128",
             "HORIZON_MINUTES": "5",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
-
             "TRAIN_FRAC": "0.80",
             "VAL_FRAC": "0.10",
             "EXTRA_EMBARGO_MINUTES": "0",
-
             "DATE_FRACTION": "1.0",
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
-
-            # >>> ONLY TRAIN ON DECEMBER (fast)
             "TRAIN_MONTH": "12",
             "TRAIN_YEAR": "2025",
-
             "MODEL_NAME": "lstm_forecast",
             "EXPERIMENT_NAME": "lstm_forecast",
         },
@@ -85,7 +81,6 @@ with DAG(
         in_cluster=True,
     )
 
-    # 2) REGISTER (PHẢI chạy bằng SA có quyền patch namespace model)
     register = KubernetesPodOperator(
         task_id="register_model",
         name="register-model",
@@ -119,23 +114,17 @@ fi
 """
         ],
         do_xcom_push=True,
-
-        # >>> CHỖ QUAN TRỌNG CHO RBAC <<<
         service_account_name="register-model-sa",
         automount_service_account_token=True,
-
         env_vars={
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "MLFLOW_S3_ENDPOINT_URL": "https://minio.voducanh.id.vn",
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
-
             "MLFLOW_TRACKING_URI": "http://mlflow.mlflow.svc.cluster.local:5000",
-
             "MODEL_NAME": "lstm_forecast",
             "EXPERIMENT_NAME": "lstm_forecast",
-
             "COMPARE_WITH_PRODUCTION": "true",
             "TARGET_STAGE": "Production",
             "ARCHIVE_OLD": "true",
@@ -143,11 +132,8 @@ fi
             "MIN_IMPROVE_P95": "0.0",
             "MIN_IMPROVE_UNDER": "0.0",
             "PROMOTED_EXIT_CODE": "10",
-
             "K8S_ENABLE": "true",
             "K8S_NAMESPACE": "model",
-            "SERVING_CONFIGMAP": "lstm-config",
-            "CONFIG_KEY_MODEL_URI": "MODEL_URI",
             "RESTART_DEPLOYMENTS": "lstm-serving",
         },
         env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
@@ -167,13 +153,11 @@ fi
         in_cluster=True,
     )
 
-    # 3) GATE
     gate = ShortCircuitOperator(
         task_id="gate_reference",
         python_callable=_should_run_reference,
     )
 
-    # 4) REFERENCE (không cần quyền patch configmap/deployments nên không bắt buộc SA)
     reference = KubernetesPodOperator(
         task_id="save_reference",
         name="drift-reference",
@@ -192,21 +176,16 @@ fi
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
-
             "HORIZON_MINUTES": "5",
             "TRAIN_FRAC": "0.80",
             "VAL_FRAC": "0.10",
             "EXTRA_EMBARGO_MINUTES": "0",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
-
             "DATE_FRACTION": "1.0",
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
-
-            # >>> Keep reference aligned with training window (December only)
             "TRAIN_MONTH": "12",
             "TRAIN_YEAR": "2025",
-
             "MODEL_NAME": "lstm_forecast",
             "REF_PREFIX": "drift/reference",
             "SAVE_LATEST_POINTER": "true",

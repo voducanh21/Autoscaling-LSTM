@@ -1,3 +1,7 @@
+# ================================
+# ConfigMap: register-model-script
+# (EDITED: only rollout restart deployment; no ConfigMap patch needed)
+# ================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,7 +14,7 @@ data:
     import json
     import math
     from datetime import datetime, timezone
-    from typing import Optional, Dict, Tuple, List
+    from typing import Optional, Dict, Tuple
 
     import mlflow
     from mlflow.tracking import MlflowClient
@@ -23,37 +27,27 @@ data:
         print("[ERROR] MLFLOW_TRACKING_URI is required", file=sys.stderr)
         sys.exit(1)
 
-    # ---- LSTM defaults (match train_lstm.py) ----
     MODEL_NAME = os.getenv("MODEL_NAME", "lstm_forecast").strip()
     EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", MODEL_NAME).strip()
-
-    # train_lstm.py logs artifacts to artifact_path="model"
     MODEL_ARTIFACT_PATH = os.getenv("MODEL_ARTIFACT_PATH", "model").strip() or "model"
 
     TARGET_STAGE = os.getenv("TARGET_STAGE", "Production").strip() or "Production"
     ARCHIVE_OLD = os.getenv("ARCHIVE_OLD", "true").lower() == "true"
-
-    # Compare: candidate(latest run) vs current Production (champion). If no Production -> promote candidate.
     COMPARE_WITH_PRODUCTION = os.getenv("COMPARE_WITH_PRODUCTION", "true").lower() == "true"
 
-    # Require all 3 to DECREASE by at least these deltas (0.0 = strictly smaller)
     MIN_IMPROVE_WAPE = float(os.getenv("MIN_IMPROVE_WAPE", "0.0"))
     MIN_IMPROVE_P95 = float(os.getenv("MIN_IMPROVE_P95", "0.0"))
     MIN_IMPROVE_UNDER = float(os.getenv("MIN_IMPROVE_UNDER", "0.0"))
 
-    # Metrics keys (must exist in training run) - match train_lstm.py
     MET_TEST_WAPE_RPS = os.getenv("MET_TEST_WAPE_RPS", "test_wape_rps")
     MET_TEST_P95_ABS_ERR_RPS = os.getenv("MET_TEST_P95_ABS_ERR_RPS", "test_p95_abs_err_rps")
     MET_TEST_UNDER_RATE_RPS = os.getenv("MET_TEST_UNDER_RATE_RPS", "test_under_rate_rps")
 
-    # Exit code when promoted so shell can run save_reference only on promotion
     PROMOTED_EXIT_CODE = int(os.getenv("PROMOTED_EXIT_CODE", "10"))
 
-    # K8s patch/restart
+    # K8s restart only (no ConfigMap patch)
     K8S_ENABLE = os.getenv("K8S_ENABLE", "true").lower() == "true"
     K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "model").strip() or "model"
-    SERVING_CONFIGMAP = os.getenv("SERVING_CONFIGMAP", "lstm-config").strip() or "lstm-config"
-    CONFIG_KEY_MODEL_URI = os.getenv("CONFIG_KEY_MODEL_URI", "MODEL_URI").strip() or "MODEL_URI"
     RESTART_DEPLOYMENTS = [x.strip() for x in os.getenv("RESTART_DEPLOYMENTS", "lstm-serving").split(",") if x.strip()]
 
     # ============================================================
@@ -99,7 +93,7 @@ data:
                 continue
 
             wape = _to_float(r.get(f"metrics.{MET_TEST_WAPE_RPS}"))
-            p95  = _to_float(r.get(f"metrics.{MET_TEST_P95_ABS_ERR_RPS}"))
+            p95 = _to_float(r.get(f"metrics.{MET_TEST_P95_ABS_ERR_RPS}"))
             under = _to_float(r.get(f"metrics.{MET_TEST_UNDER_RATE_RPS}"))
 
             if wape is None or p95 is None or under is None:
@@ -118,7 +112,6 @@ data:
         )
 
     def _get_production_run_id() -> Optional[str]:
-        # Prefer explicit stage query
         try:
             vers = client.get_latest_versions(MODEL_NAME, stages=[TARGET_STAGE])
             if vers:
@@ -126,7 +119,6 @@ data:
         except Exception:
             pass
 
-        # Fallback scan all versions
         try:
             vers = client.get_latest_versions(MODEL_NAME)
             for v in vers or []:
@@ -168,7 +160,7 @@ data:
         )
 
     # ============================================================
-    # K8s helpers (in-cluster)
+    # K8s helpers (restart only)
     # ============================================================
     def _k8s_request(method: str, path: str, body: Optional[dict] = None):
         import requests
@@ -206,11 +198,6 @@ data:
             return r.json()
         return None
 
-    def patch_configmap(namespace: str, name: str, data_patch: dict):
-        path = f"/api/v1/namespaces/{namespace}/configmaps/{name}"
-        body = {"data": data_patch}
-        _k8s_request("PATCH", path, body)
-
     def restart_deployment(namespace: str, name: str):
         path = f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
         ts = _now_iso()
@@ -228,7 +215,7 @@ data:
         _k8s_request("PATCH", path, body)
 
     # ============================================================
-    # Registry helpers (first-time safe)
+    # Registry helpers
     # ============================================================
     def ensure_registered_model_exists(name: str):
         try:
@@ -243,7 +230,6 @@ data:
             print(f"[WARN] create_registered_model ignored: {e}")
 
     def find_existing_version_for_run(name: str, run_id: str) -> Optional[str]:
-        # If train_lstm.py already called mlflow.register_model, reuse that version (avoid duplicates).
         try:
             q = f"name='{name}' and run_id='{run_id}'"
             vers = client.search_model_versions(q)
@@ -252,7 +238,6 @@ data:
                 ver = getattr(v, "version", None)
                 if ver is None:
                     continue
-                # pick max numeric version
                 try:
                     iv = int(str(ver))
                 except Exception:
@@ -264,7 +249,6 @@ data:
             return None
 
     def create_model_version_for_run(name: str, run_id: str):
-        # Prefer runs:/ URI (matches train_lstm.py artifact_path="model")
         model_uri = f"runs:/{run_id}/{MODEL_ARTIFACT_PATH}"
         try:
             mv = client.create_model_version(name=name, source=model_uri, run_id=run_id)
@@ -312,16 +296,12 @@ data:
             sys.exit(0)
         print("[INFO] Candidate decreased all 3 vs Production -> promote")
 
-    # Create/reuse model version + promote
-    serving_uri = f"runs:/{cand_run_id}/{MODEL_ARTIFACT_PATH}"
     chosen_version = None
-    registry_ok = False
     promoted = False
 
     try:
         ensure_registered_model_exists(MODEL_NAME)
 
-        # Reuse existing version if training already registered it
         existing_ver = find_existing_version_for_run(MODEL_NAME, cand_run_id)
         if existing_ver:
             chosen_version = existing_ver
@@ -338,38 +318,25 @@ data:
                 stage=TARGET_STAGE,
                 archive_existing_versions=ARCHIVE_OLD,
             )
-            serving_uri = f"models:/{MODEL_NAME}/{TARGET_STAGE}"
-            registry_ok = True
             promoted = True
             print(f"[INFO] Promoted | name={MODEL_NAME} version={chosen_version} stage={TARGET_STAGE}")
     except Exception as e:
-        print(f"[WARN] Registry promotion failed, fallback to runs URI. err={e}")
+        print(f"[ERROR] Registry promotion failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    # Patch serving ConfigMap + restart
+    # Restart serving so it reloads models:/.../Production
     if K8S_ENABLE:
         try:
-            patch = {
-                "MODEL_NAME": MODEL_NAME,
-                "MODEL_STAGE": TARGET_STAGE if registry_ok else "RUNS",
-                "MODEL_VERSION": str(chosen_version) if chosen_version is not None else "",
-                "RUN_ID": cand_run_id,
-                "MODEL_ARTIFACT_PATH": MODEL_ARTIFACT_PATH,
-                "UPDATED_AT": _now_iso(),
-                CONFIG_KEY_MODEL_URI: serving_uri,
-            }
-            patch_configmap(K8S_NAMESPACE, SERVING_CONFIGMAP, patch)
-            print(f"[INFO] Patched ConfigMap {K8S_NAMESPACE}/{SERVING_CONFIGMAP} -> {CONFIG_KEY_MODEL_URI}={serving_uri}")
-
             for dep in RESTART_DEPLOYMENTS:
                 restart_deployment(K8S_NAMESPACE, dep)
                 print(f"[INFO] Restarted Deployment {K8S_NAMESPACE}/{dep}")
         except Exception as e:
-            print(f"[ERROR] K8S patch/restart failed: {e}", file=sys.stderr)
+            print(f"[ERROR] K8S restart failed: {e}", file=sys.stderr)
             sys.exit(1)
 
-    print(f"[DONE] register | model={MODEL_NAME} uri={serving_uri} registry_ok={registry_ok} run_id={cand_run_id}")
+    print(f"[DONE] register | model={MODEL_NAME} promoted={promoted} run_id={cand_run_id}")
 
-    # If promoted -> special exit code so CronJob can run save_reference.py
     if promoted:
         sys.exit(PROMOTED_EXIT_CODE)
     sys.exit(0)
+---
