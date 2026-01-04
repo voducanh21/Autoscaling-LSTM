@@ -6,10 +6,6 @@ from kubernetes import client as k8s
 
 
 def _should_run_reference(ti) -> bool:
-    """
-    register task sẽ push XCom {"promoted": true/false, "rc": <int>}
-    reference chỉ chạy khi promoted == True
-    """
     x = ti.xcom_pull(task_ids="register_model")
     try:
         return bool((x or {}).get("promoted", False))
@@ -26,7 +22,7 @@ with DAG(
         tags=["mlflow", "train", "lstm"],
 ) as dag:
 
-    # 1) TRAIN
+    # 1) TRAIN (không cần RBAC cross-namespace)
     train = KubernetesPodOperator(
         task_id="train_model",
         name="train-lstm-forecast",
@@ -41,7 +37,6 @@ with DAG(
             "echo '[INFO] Training done.'"
         ],
         env_vars={
-            # --- S3 / MinIO ---
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "MLFLOW_S3_ENDPOINT_URL": "https://minio.voducanh.id.vn",
             "MLFLOW_ARTIFACT_ROOT": "s3://datalake/mlflow",
@@ -50,33 +45,26 @@ with DAG(
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
 
-            # --- MLflow ---
             "MLFLOW_TRACKING_URI": "http://mlflow.mlflow.svc.cluster.local:5000",
 
-            # --- Training Params ---
             "WINDOW_SIZE": "10",
             "EPOCHS": "20",
             "BATCH_SIZE": "128",
             "HORIZON_MINUTES": "5",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
 
-            # --- Split 80/10/10 ---
             "TRAIN_FRAC": "0.80",
             "VAL_FRAC": "0.10",
             "EXTRA_EMBARGO_MINUTES": "0",
 
-            # --- FULL DATA MODE ---
             "DATE_FRACTION": "1.0",
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
 
-            # --- Model / Experiment ---
             "MODEL_NAME": "lstm_forecast",
             "EXPERIMENT_NAME": "lstm_forecast",
         },
-        env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[
             k8s.V1Volume(
                 name="train-scripts",
@@ -86,37 +74,14 @@ with DAG(
                 ),
             ),
         ],
-        volume_mounts=[
-            k8s.V1VolumeMount(name="train-scripts", mount_path="/app/train", read_only=True),
-        ],
-        affinity=k8s.V1Affinity(
-            pod_anti_affinity=k8s.V1PodAntiAffinity(
-                preferred_during_scheduling_ignored_during_execution=[
-                    k8s.V1WeightedPodAffinityTerm(
-                        weight=100,
-                        pod_affinity_term=k8s.V1PodAffinityTerm(
-                            label_selector=k8s.V1LabelSelector(
-                                match_expressions=[
-                                    k8s.V1LabelSelectorRequirement(
-                                        key="airflow-task",
-                                        operator="In",
-                                        values=["train-lstm-forecast", "register-model", "drift-reference"],
-                                    )
-                                ]
-                            ),
-                            topology_key="kubernetes.io/hostname",
-                        ),
-                    )
-                ]
-            )
-        ),
+        volume_mounts=[k8s.V1VolumeMount(name="train-scripts", mount_path="/app/train", read_only=True)],
         labels={"airflow-task": "train-lstm-forecast"},
         is_delete_operator_pod=True,
         get_logs=True,
         in_cluster=True,
     )
 
-    # 2) REGISTER (convert exit code 10 -> success + XCom)
+    # 2) REGISTER (PHẢI chạy bằng SA có quyền patch namespace model)
     register = KubernetesPodOperator(
         task_id="register_model",
         name="register-model",
@@ -150,22 +115,23 @@ fi
 """
         ],
         do_xcom_push=True,
+
+        # >>> CHỖ QUAN TRỌNG CHO RBAC <<<
+        service_account_name="register-model-sa",
+        automount_service_account_token=True,
+
         env_vars={
-            # --- S3 / MinIO ---
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "MLFLOW_S3_ENDPOINT_URL": "https://minio.voducanh.id.vn",
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
 
-            # --- MLflow ---
             "MLFLOW_TRACKING_URI": "http://mlflow.mlflow.svc.cluster.local:5000",
 
-            # --- Model / Experiment ---
             "MODEL_NAME": "lstm_forecast",
             "EXPERIMENT_NAME": "lstm_forecast",
 
-            # --- Register behavior ---
             "COMPARE_WITH_PRODUCTION": "true",
             "TARGET_STAGE": "Production",
             "ARCHIVE_OLD": "true",
@@ -174,16 +140,13 @@ fi
             "MIN_IMPROVE_UNDER": "0.0",
             "PROMOTED_EXIT_CODE": "10",
 
-            # --- Patch serving ---
             "K8S_ENABLE": "true",
             "K8S_NAMESPACE": "model",
             "SERVING_CONFIGMAP": "lstm-config",
             "CONFIG_KEY_MODEL_URI": "MODEL_URI",
             "RESTART_DEPLOYMENTS": "lstm-serving",
         },
-        env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[
             k8s.V1Volume(
                 name="register-scripts",
@@ -193,43 +156,20 @@ fi
                 ),
             ),
         ],
-        volume_mounts=[
-            k8s.V1VolumeMount(name="register-scripts", mount_path="/app/register", read_only=True),
-        ],
-        affinity=k8s.V1Affinity(
-            pod_anti_affinity=k8s.V1PodAntiAffinity(
-                preferred_during_scheduling_ignored_during_execution=[
-                    k8s.V1WeightedPodAffinityTerm(
-                        weight=100,
-                        pod_affinity_term=k8s.V1PodAffinityTerm(
-                            label_selector=k8s.V1LabelSelector(
-                                match_expressions=[
-                                    k8s.V1LabelSelectorRequirement(
-                                        key="airflow-task",
-                                        operator="In",
-                                        values=["train-lstm-forecast", "register-model", "drift-reference"],
-                                    )
-                                ]
-                            ),
-                            topology_key="kubernetes.io/hostname",
-                        ),
-                    )
-                ]
-            )
-        ),
+        volume_mounts=[k8s.V1VolumeMount(name="register-scripts", mount_path="/app/register", read_only=True)],
         labels={"airflow-task": "register-model"},
         is_delete_operator_pod=True,
         get_logs=True,
         in_cluster=True,
     )
 
-    # 3) GATE (skip reference if not promoted)
+    # 3) GATE
     gate = ShortCircuitOperator(
         task_id="gate_reference",
         python_callable=_should_run_reference,
     )
 
-    # 4) REFERENCE (only if promoted)
+    # 4) REFERENCE (không cần quyền patch configmap/deployments nên không bắt buộc SA)
     reference = KubernetesPodOperator(
         task_id="save_reference",
         name="drift-reference",
@@ -244,34 +184,28 @@ fi
             "echo '[INFO] Drift reference saved.'"
         ],
         env_vars={
-            # --- S3 / MinIO ---
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
             "S3_BUCKET": "datalake",
             "SILVER_PREFIX": "silver/metrics",
             "AWS_S3_ADDRESSING_STYLE": "path",
 
-            # --- Split/Horizon (match train) ---
             "HORIZON_MINUTES": "5",
             "TRAIN_FRAC": "0.80",
             "VAL_FRAC": "0.10",
             "EXTRA_EMBARGO_MINUTES": "0",
             "TIMEZONE": "Asia/Ho_Chi_Minh",
 
-            # --- FULL DATA MODE ---
             "DATE_FRACTION": "1.0",
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
 
-            # --- Reference output ---
             "MODEL_NAME": "lstm_forecast",
             "REF_PREFIX": "drift/reference",
             "SAVE_LATEST_POINTER": "true",
             "REF_PER_SERVICE": "true",
             "REF_MAX_ROWS_PER_SERVICE": "200000",
         },
-        env_from=[
-            k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
-        ],
+        env_from=[k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))],
         volumes=[
             k8s.V1Volume(
                 name="ref-scripts",
@@ -281,30 +215,7 @@ fi
                 ),
             ),
         ],
-        volume_mounts=[
-            k8s.V1VolumeMount(name="ref-scripts", mount_path="/app/drift", read_only=True),
-        ],
-        affinity=k8s.V1Affinity(
-            pod_anti_affinity=k8s.V1PodAntiAffinity(
-                preferred_during_scheduling_ignored_during_execution=[
-                    k8s.V1WeightedPodAffinityTerm(
-                        weight=100,
-                        pod_affinity_term=k8s.V1PodAffinityTerm(
-                            label_selector=k8s.V1LabelSelector(
-                                match_expressions=[
-                                    k8s.V1LabelSelectorRequirement(
-                                        key="airflow-task",
-                                        operator="In",
-                                        values=["train-lstm-forecast", "register-model", "drift-reference"],
-                                    )
-                                ]
-                            ),
-                            topology_key="kubernetes.io/hostname",
-                        ),
-                    )
-                ]
-            )
-        ),
+        volume_mounts=[k8s.V1VolumeMount(name="ref-scripts", mount_path="/app/drift", read_only=True)],
         labels={"airflow-task": "drift-reference"},
         is_delete_operator_pod=True,
         get_logs=True,
