@@ -61,6 +61,10 @@ with DAG(
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
 
+            # >>> ONLY TRAIN ON DECEMBER (fast)
+            "TRAIN_MONTH": "12",
+            "TRAIN_YEAR": "2025",
+
             "MODEL_NAME": "lstm_forecast",
             "EXPERIMENT_NAME": "lstm_forecast",
         },
@@ -198,6 +202,10 @@ fi
             "DATE_FRACTION": "1.0",
             "DATE_PICK_MODE": "all",
             "DATE_SEED": "42",
+
+            # >>> Keep reference aligned with training window (December only)
+            "TRAIN_MONTH": "12",
+            "TRAIN_YEAR": "2025",
 
             "MODEL_NAME": "lstm_forecast",
             "REF_PREFIX": "drift/reference",
