@@ -1,0 +1,450 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: describe-bronze-per-service-script
+  namespace: cronjob
+data:
+  describe_bronze_per_service.py: |
+    import os, re, json, math
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import numpy as np
+    import pandas as pd
+    import s3fs
+    import pyarrow.parquet as pq
+
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT", "").strip()
+    BUCKET = os.getenv("S3_BUCKET", "datalake").strip()
+    AWS_S3_ADDRESSING_STYLE = os.getenv("AWS_S3_ADDRESSING_STYLE", "path").strip()
+
+    INPUT_PREFIX = os.getenv("INPUT_PREFIX", "bronze/metrics").strip().strip("/")
+    OUTPUT_PREFIX = os.getenv("OUTPUT_PREFIX", "des-bronze/evidently/describe/bronze_metrics").strip().strip("/")
+
+    SERVICES = [s.strip() for s in os.getenv(
+        "SERVICES",
+        "api-gateway,authentication-service,order-service,payment-service,product-service"
+    ).split(",") if s.strip()]
+
+    START_DATE = os.getenv("START_DATE", "").strip()
+    END_DATE = os.getenv("END_DATE", "").strip()
+
+    TS_COL = os.getenv("TS_COL", "ts").strip()
+    SERVICE_COL = os.getenv("SERVICE_COL", "service").strip()
+
+    NUM_COLS_ENV = os.getenv("NUM_COLS", "").strip()
+    NUM_COLS = [c.strip() for c in NUM_COLS_ENV.split(",") if c.strip()] if NUM_COLS_ENV else None
+
+    CAT_COLS_ENV = os.getenv("CAT_COLS", "hour,dow").strip()
+    CAT_COLS = [c.strip() for c in CAT_COLS_ENV.split(",") if c.strip()]
+
+    # RPS bucket config
+    RPS_COL = os.getenv("RPS_COL", "rps_1m").strip()
+    RPS_BUCKET_SIZE = float(os.getenv("RPS_BUCKET_SIZE", "100"))
+    RPS_BUCKET_MAX = float(os.getenv("RPS_BUCKET_MAX", "2000"))  # <= 2000, and a 2000+ bucket
+
+    # If cpu_norm missing -> drop mem_norm (default true)
+    KEEP_MEM_NORM_WITHOUT_CPU_NORM = os.getenv("KEEP_MEM_NORM_WITHOUT_CPU_NORM", "false").lower() == "true"
+
+    TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh").strip()
+    tz = ZoneInfo(TIMEZONE)
+
+    RUN_TAG = os.getenv("RUN_TAG", "").strip() or dt.datetime.now(tz).strftime("%Y%m%dT%H%M%S")
+
+    MAX_FILES = int(os.getenv("MAX_FILES", "0"))
+    HIST_BINS = int(os.getenv("HIST_BINS", "30"))
+
+    if not S3_ENDPOINT:
+        raise RuntimeError("S3_ENDPOINT is empty")
+
+    fs = s3fs.S3FileSystem(
+        key=os.environ.get("AWS_ACCESS_KEY_ID"),
+        secret=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        client_kwargs={"endpoint_url": S3_ENDPOINT},
+        config_kwargs={"s3": {"addressing_style": AWS_S3_ADDRESSING_STYLE}} if AWS_S3_ADDRESSING_STYLE else None,
+    )
+
+    def parse_date_from_path(p: str):
+        m = re.search(r"date=(\d{4}-\d{2}-\d{2})", p)
+        return m.group(1) if m else None
+
+    def in_range(p: str) -> bool:
+        if not START_DATE or not END_DATE:
+            return True
+        d = parse_date_from_path(p)
+        return bool(d and (START_DATE <= d <= END_DATE))
+
+    def list_parquet_files(service: str):
+        pattern = f"{BUCKET}/{INPUT_PREFIX}/date=*/service={service}/*.parquet"
+        files = [f for f in fs.glob(pattern) if in_range(f)]
+        files = sorted(files)
+        if MAX_FILES and len(files) > MAX_FILES:
+            files = files[-MAX_FILES:]
+        return files
+
+    def read_parquet_df(s3_path: str) -> pd.DataFrame:
+        with fs.open(s3_path, "rb") as f:
+            return pq.read_table(f).to_pandas()
+
+    def write_s3_bytes(key: str, data: bytes):
+        with fs.open(f"{BUCKET}/{key}", "wb") as f:
+            f.write(data)
+
+    def fmt2(v):
+        try:
+            if v is None or pd.isna(v):
+                return ""
+        except Exception:
+            pass
+        try:
+            fv = float(v)
+            if math.isnan(fv) or math.isinf(fv):
+                return str(fv)
+            return f"{fv:.2f}"
+        except Exception:
+            return str(v)
+
+    def df_to_html_table(df: pd.DataFrame, max_rows=500):
+        if df is None or df.empty:
+            return "<div class='muted'>No data</div>"
+        if len(df) > max_rows:
+            df = df.head(max_rows)
+        d2 = df.copy()
+        for c in d2.columns:
+            if pd.api.types.is_float_dtype(d2[c]) or pd.api.types.is_integer_dtype(d2[c]):
+                d2[c] = d2[c].map(fmt2)
+            else:
+                d2[c] = d2[c].astype("string").fillna("")
+        return d2.to_html(index=False, escape=True, classes="tbl")
+
+    def histogram_html(series: pd.Series, bins=30):
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if s.empty:
+            return "<div class='muted'>No numeric data</div>"
+        arr = s.to_numpy(dtype=np.float64, copy=False)
+        lo = np.nanpercentile(arr, 1)
+        hi = np.nanpercentile(arr, 99)
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            lo = float(np.nanmin(arr)); hi = float(np.nanmax(arr))
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+            return "<div class='muted'>Cannot build histogram</div>"
+        hist, edges = np.histogram(arr, bins=bins, range=(lo, hi))
+        mx = int(hist.max()) if hist.size else 0
+        if mx <= 0:
+            return "<div class='muted'>Empty histogram</div>"
+        bars = []
+        for i, h in enumerate(hist):
+            height = int(round((h / mx) * 60))
+            title = f"{fmt2(edges[i])} .. {fmt2(edges[i+1])} : {int(h)}"
+            bars.append(f"<div class='bar' style='height:{height}px' title='{title}'></div>")
+        return "<div class='hist'>" + "".join(bars) + "</div>"
+
+    def choose_numeric_cols(df: pd.DataFrame):
+        ncols = NUM_COLS if NUM_COLS else df.select_dtypes(include="number").columns.tolist()
+        has_cpu_norm = "cpu_norm" in df.columns
+        if (not has_cpu_norm) and (not KEEP_MEM_NORM_WITHOUT_CPU_NORM):
+            ncols = [c for c in ncols if c != "mem_norm"]
+        return ncols
+
+    def build_summary(df: pd.DataFrame, svc: str):
+        out = {
+            "service": svc,
+            "rows": int(len(df)),
+            "columns": list(df.columns),
+            "run_tag": RUN_TAG,
+            "range": {"start_date": START_DATE or None, "end_date": END_DATE or None},
+            "missing_ratio": {c: float(df[c].isna().mean()) for c in df.columns},
+        }
+        if TS_COL in df.columns:
+            ts = pd.to_datetime(df[TS_COL], errors="coerce").dropna().sort_values()
+            if not ts.empty:
+                out["time_min"] = str(ts.iloc[0])
+                out["time_max"] = str(ts.iloc[-1])
+                if len(ts) >= 2:
+                    diffs = ts.diff().dropna()
+                    out["median_step_seconds"] = float(diffs.median().total_seconds())
+        return out
+
+    def build_rps_buckets(df: pd.DataFrame):
+        if RPS_COL not in df.columns:
+            return None
+        rps = pd.to_numeric(df[RPS_COL], errors="coerce").dropna()
+        if rps.empty:
+            return None
+        
+        # <= 2000 buckets
+        max_edge = max(RPS_BUCKET_MAX, RPS_BUCKET_SIZE)
+        edges = np.arange(0.0, max_edge + RPS_BUCKET_SIZE, RPS_BUCKET_SIZE)
+        
+        within = rps[rps < max_edge]
+        cats = pd.cut(within, bins=edges, right=False, include_lowest=True)  # [0,100),...
+        vc = cats.value_counts().sort_index()
+        
+        over = int((rps >= max_edge).sum())
+        total = float(len(rps))
+        
+        rows = []
+        for interval, cnt in vc.items():
+            left = float(interval.left); right = float(interval.right)
+            rows.append({
+                "range_rps": f"{left:.0f}-{right:.0f}",
+                "count": int(cnt),
+                "pct": float(cnt) / total * 100.0,
+            })
+        # add 2000+ bucket
+        rows.append({
+            "range_rps": f"{max_edge:.0f}+",
+            "count": int(over),
+            "pct": float(over) / total * 100.0,
+        })
+        
+        return pd.DataFrame(rows)
+
+    def build_html(df: pd.DataFrame, svc: str, summary: dict) -> str:
+        miss = pd.DataFrame({
+            "column": list(df.columns),
+            "missing_ratio": [df[c].isna().mean() for c in df.columns],
+            "dtype": [str(df[c].dtype) for c in df.columns],
+        }).sort_values("missing_ratio", ascending=False)
+        
+        ncols = choose_numeric_cols(df)
+        
+        # Numeric summary (NO min/max)
+        num_rows = []
+        for c in ncols:
+            if c not in df.columns:
+                continue
+            s = pd.to_numeric(df[c], errors="coerce").dropna()
+            if s.empty:
+                continue
+            num_rows.append({
+                "column": c,
+                "count": int(s.size),
+                "mean": float(s.mean()),
+                "p50": float(s.quantile(0.50)),
+                "p90": float(s.quantile(0.90)),
+                "p95": float(s.quantile(0.95)),
+                "p99": float(s.quantile(0.99)),
+            })
+        num_df = pd.DataFrame(num_rows)
+        
+        # RPS bucket distribution (<=2000 + 2000+)
+        rps_df = build_rps_buckets(df)
+        rps_section = "<div class='muted'>rps bucket table not available</div>"
+        if rps_df is not None and not rps_df.empty:
+            rps_section = df_to_html_table(rps_df, max_rows=500)
+        
+        # Categorical top values
+        cat_sections = []
+        for c in CAT_COLS:
+            if c not in df.columns:
+                continue
+            vc = df[c].astype("string").fillna("NULL").value_counts().head(20)
+            cdf = pd.DataFrame({"value": vc.index.astype(str), "count": vc.values})
+            cat_sections.append(f"<h3>Top values: {c}</h3>{df_to_html_table(cdf, max_rows=20)}")
+        
+        # Histograms (top 6 numeric cols)
+        hist_sections = []
+        for c in ncols[:6]:
+            if c not in df.columns:
+                continue
+            hist_sections.append(
+                f"<div class='card'><div class='card-h'>Histogram: {c}</div>{histogram_html(df[c], bins=HIST_BINS)}</div>"
+            )
+        
+        range_txt = "ALL" if not (START_DATE and END_DATE) else f"{START_DATE} .. {END_DATE}"
+        
+        css = """
+      <style>
+        body{font-family:Arial,Helvetica,sans-serif;margin:24px;color:#111}
+        .muted{color:#666}
+        .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+        .card{border:1px solid #ddd;border-radius:10px;padding:12px;background:#fff}
+        .card-h{font-weight:700;margin-bottom:8px}
+        .tbl{border-collapse:collapse;width:100%;font-size:12px}
+        .tbl th,.tbl td{border:1px solid #e6e6e6;padding:6px 8px;text-align:left}
+        .tbl th{background:#f6f6f6}
+        .hist{display:flex;align-items:flex-end;gap:2px;height:70px;padding:6px;border:1px solid #eee;border-radius:8px;background:#fafafa}
+        .bar{width:6px;background:#555;border-radius:2px}
+        h1{font-size:20px;margin:0 0 6px 0}
+        h2{font-size:16px;margin:18px 0 8px}
+        h3{font-size:14px;margin:14px 0 8px}
+        .kvs{display:grid;grid-template-columns:180px 1fr;gap:6px;font-size:13px}
+        .k{color:#444}
+      </style>
+      """
+        
+        html = f"""
+      <html>
+      <head><meta charset="utf-8"/><title>Bronze Metrics Description - {svc}</title>{css}</head>
+      <body>
+        <h1>Bronze Metrics Description</h1>
+        <div class="muted">RPS buckets capped at {RPS_BUCKET_MAX:.0f} with an overflow bucket ({RPS_BUCKET_MAX:.0f}+). Numeric values rounded to 2 decimals.</div>
+
+        <div class="grid">
+          <div class="card">
+            <div class="card-h">Dataset overview</div>
+            <div class="kvs">
+              <div class="k">Service</div><div>{svc}</div>
+              <div class="k">Range filter</div><div>{range_txt}</div>
+              <div class="k">Rows</div><div>{summary.get("rows")}</div>
+              <div class="k">Columns</div><div>{len(df.columns)}</div>
+              <div class="k">Time min</div><div>{summary.get("time_min","N/A")}</div>
+              <div class="k">Time max</div><div>{summary.get("time_max","N/A")}</div>
+              <div class="k">Median step (s)</div><div>{fmt2(summary.get("median_step_seconds")) or "N/A"}</div>
+              <div class="k">Run tag</div><div>{RUN_TAG}</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-h">Missingness (top)</div>
+            {df_to_html_table(miss, max_rows=20)}
+          </div>
+        </div>
+
+        <h2>RPS bucket distribution ({RPS_COL})</h2>
+        <div class="card">
+          <div class="muted">Buckets: 0-100, 100-200, ..., {RPS_BUCKET_MAX:.0f}+ (bucket size={RPS_BUCKET_SIZE:g})</div>
+          {rps_section}
+        </div>
+
+        <h2>Numeric summary (no min/max)</h2>
+        <div class="card">{df_to_html_table(num_df, max_rows=500)}</div>
+
+        <h2>Histograms</h2>
+        <div class="grid">
+          {''.join(hist_sections) if hist_sections else "<div class='muted'>No numeric columns for histogram.</div>"}
+        </div>
+
+        <h2>Categorical distributions</h2>
+        {''.join(cat_sections) if cat_sections else "<div class='muted'>No categorical columns found.</div>"}
+      </body>
+      </html>
+      """
+        return html
+
+    def main():
+        for svc in SERVICES:
+            paths = list_parquet_files(svc)
+            if not paths:
+                print(f"[WARN] No parquet for service={svc}")
+                continue
+            
+            frames = []
+            for p in paths:
+                try:
+                    frames.append(read_parquet_df(p))
+                except Exception as e:
+                    print(f"[WARN] read failed: {p} err={e}")
+            if not frames:
+                print(f"[WARN] All reads failed for service={svc}")
+                continue
+            
+            df = pd.concat(frames, ignore_index=True)
+            if SERVICE_COL not in df.columns:
+                df[SERVICE_COL] = svc
+            
+            summary = build_summary(df, svc)
+            html = build_html(df, svc, summary)
+            
+            base = f"{OUTPUT_PREFIX}/service={svc}/run={RUN_TAG}"
+            if START_DATE and END_DATE:
+                base += f"/range={START_DATE}_to_{END_DATE}"
+            else:
+                base += "/range=ALL"
+            
+            write_s3_bytes(f"{base}/report.html", html.encode("utf-8"))
+            write_s3_bytes(f"{base}/summary.json", json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8"))
+            
+            print(f"[OK] {svc} -> s3://{BUCKET}/{base}/report.html")
+
+    if __name__ == "__main__":
+        main()
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: describe-bronze-metrics-per-service
+  namespace: cronjob
+spec:
+  schedule: "0 3 * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k3n-m03
+          serviceAccountName: register-model-sa
+          containers:
+            - name: describe-bronze
+              image: ducanhvo/train-lstm:latest
+              imagePullPolicy: Always
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+                  set -o pipefail
+                  echo "[INFO] Describe bronze metrics -> HTML (per-service)"
+                  python /describe/describe_bronze_per_service.py
+              env:
+                - name: S3_ENDPOINT
+                  value: "https://minio.voducanh.id.vn"
+                - name: S3_BUCKET
+                  value: "datalake"
+                - name: AWS_S3_ADDRESSING_STYLE
+                  value: "path"
+
+                - name: INPUT_PREFIX
+                  value: "bronze/metrics"
+                - name: OUTPUT_PREFIX
+                  value: "des-bronze/evidently/describe/bronze_metrics"
+
+                - name: TIMEZONE
+                  value: "Asia/Ho_Chi_Minh"
+
+                - name: SERVICES
+                  value: "api-gateway,authentication-service,order-service,payment-service,product-service"
+
+                - name: TS_COL
+                  value: "ts"
+                - name: SERVICE_COL
+                  value: "service"
+
+                # RPS buckets (cap at 2000 + overflow)
+                - name: RPS_COL
+                  value: "rps_1m"
+                - name: RPS_BUCKET_SIZE
+                  value: "100"
+                - name: RPS_BUCKET_MAX
+                  value: "1000"
+
+                # drop mem_norm if cpu_norm not present
+                - name: KEEP_MEM_NORM_WITHOUT_CPU_NORM
+                  value: "false"
+
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-cred
+                      key: AWS_SECRET_ACCESS_KEY
+
+              volumeMounts:
+                - name: script
+                  mountPath: /describe
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: describe-bronze-per-service-script
+                items:
+                  - key: describe_bronze_per_service.py
+                    path: describe_bronze_per_service.py
+                defaultMode: 0555

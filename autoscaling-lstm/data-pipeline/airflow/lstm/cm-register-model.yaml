@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: register-model-script
-  namespace: cronjob
+  namespace: airflow
 data:
   register_model.py: |
     import os
