@@ -48,7 +48,7 @@ def _should_trigger_retrain(ti) -> bool:
 
 with DAG(
         dag_id="drift_psi",
-        start_date=pendulum.datetime(2025, 10, 20, tz=VN_TZ),
+        start_date=pendulum.datetime(2026, 1, 6, tz=VN_TZ),
         schedule="0 2 * * 1",  # 02:00 mỗi Thứ 2
         catchup=False,
         max_active_runs=1,
