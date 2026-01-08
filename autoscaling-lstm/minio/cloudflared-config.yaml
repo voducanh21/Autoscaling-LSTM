@@ -5,12 +5,16 @@ metadata:
   namespace: minio
 data:
   config.yaml: |
-    tunnel: 356077d4-89e1-41ef-b578-5c8f9df1a790   # ✅ cập nhật mới
+    tunnel: 356077d4-89e1-41ef-b578-5c8f9df1a790
     credentials-file: /etc/cloudflared/credentials/credentials.json
     ingress:
       - hostname: minio.voducanh.id.vn
         service: http://minio.minio.svc.cluster.local:9000
       - hostname: minioconsole.voducanh.id.vn
         service: http://minio-console.minio.svc.cluster.local:9001
-      - service: http_status:404
 
+      # Jenkins (thêm dòng này)
+      - hostname: jenkins.voducanh.id.vn
+        service: http://jenkins-service.jenkins.svc.cluster.local:8080
+
+      - service: http_status:404

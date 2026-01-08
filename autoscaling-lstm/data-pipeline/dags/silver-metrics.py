@@ -6,7 +6,8 @@ from kubernetes import client as k8s
 with DAG(
         dag_id="silver_metrics_dag",
         start_date=datetime(2025, 10, 20),
-        schedule="*/12 * * * *",
+        # 1 week / 1 run (Monday 02:00)
+        schedule="0 2 * * 1",
         catchup=False,
         max_active_runs=1,
         tags=["silver", "metrics"],
@@ -22,15 +23,28 @@ with DAG(
             "python /app/silver_builder.py"
         ],
         env_vars={
+            # storage
             "S3_BUCKET": "datalake",
             "BRONZE_PREFIX": "bronze/metrics",
             "SILVER_PREFIX": "silver/metrics",
             "S3_ENDPOINT": "https://minio.voducanh.id.vn",
-            "TIMEZONE": "Asia/Ho_Chi_Minh",
-            "PAST_HOURS": "48",
-            "ROLL_WINDOWS": "[5,15]",
-            "LAG_MINUTES": "[1,5,10]",
             "AWS_S3_ADDRESSING_STYLE": "path",
+            "AWS_DEFAULT_REGION": "us-east-1",
+
+            # time / processing
+            "TIMEZONE": "Asia/Ho_Chi_Minh",
+            "BRONZE_LOOKBACK_DAYS": "8",
+
+            # optional tuning (keep defaults if you don't need)
+            # "HORIZON_MINUTES": "5",
+            # "FREQ": "1min",
+            # "MAX_FFILL_MINUTES": "10",
+            # "SILVER_WRITE_MODE": "overwrite",
+            # "SILVER_PART_NAME": "part-0.parquet",
+
+            # optional marker customization
+            # "BRONZE_MARKER_DIR": "bronze/metrics/_markers",
+            # "BRONZE_MARKER_NAME": "silver_builder_last_7d.json",
         },
         env_from=[
             k8s.V1EnvFromSource(secret_ref=k8s.V1SecretEnvSource(name="minio-cred"))
@@ -38,7 +52,10 @@ with DAG(
         volumes=[
             k8s.V1Volume(
                 name="silver-scripts",
-                config_map=k8s.V1ConfigMapVolumeSource(name="silver-metrics-script"),
+                config_map=k8s.V1ConfigMapVolumeSource(
+                    # IMPORTANT: ConfigMap must exist in namespace "airflow"
+                    name="silver-metrics-script"
+                ),
             )
         ],
         volume_mounts=[

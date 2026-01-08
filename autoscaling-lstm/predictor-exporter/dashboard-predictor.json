@@ -1,5 +1,5 @@
 {
-  "title": "LSTM Autoscaling – Single Service (4 Panels)",
+  "title": "LSTM Autoscaling – RPS (Observed vs Predicted)",
   "timezone": "browser",
   "schemaVersion": 37,
   "version": 1,
@@ -8,76 +8,138 @@
     "list": [
       {
         "type": "custom",
-        "name": "service",
-        "label": "Service",
+        "name": "app_service",
+        "label": "Observed service (job)",
         "query": "api-gateway,authentication-service,order-service,payment-service,product-service",
         "multi": true,
         "includeAll": true,
-        "allValue": ".*",
+        "allValue": "(api-gateway|authentication-service|order-service|payment-service|product-service)",
         "current": {
           "selected": true,
           "text": ["All"],
-          "value": ".*"
+          "value": "(api-gateway|authentication-service|order-service|payment-service|product-service)"
         }
+      },
+      {
+        "type": "custom",
+        "name": "pred_service",
+        "label": "Pred service (exporter service label)",
+        "query": "predictor-exporter-api-gateway,predictor-exporter-authentication,predictor-exporter-order,predictor-exporter-payment,predictor-exporter-product",
+        "multi": true,
+        "includeAll": true,
+        "allValue": "(predictor-exporter-api-gateway|predictor-exporter-authentication|predictor-exporter-order|predictor-exporter-payment|predictor-exporter-product)",
+        "current": {
+          "selected": true,
+          "text": ["All"],
+          "value": "(predictor-exporter-api-gateway|predictor-exporter-authentication|predictor-exporter-order|predictor-exporter-payment|predictor-exporter-product)"
+        }
+      },
+      {
+        "type": "custom",
+        "name": "horizon",
+        "label": "Horizon offset (align obs to pred)",
+        "query": "0m,5m,10m",
+        "multi": false,
+        "includeAll": false,
+        "current": { "selected": true, "text": "5m", "value": "5m" }
       }
     ]
   },
   "panels": [
     {
+      "id": 1,
       "title": "RPS – Observed vs Predicted",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
       "targets": [
         {
-          "expr": "svc:qps:rate1m{job=~\"$service\"}",
-          "legendFormat": "observed_rps ({{job}})"
+          "expr": "svc:qps:rate1m{job=~\"$app_service\"} offset $horizon",
+          "legendFormat": "obs_rps ({{job}})",
+          "refId": "A"
         },
         {
-          "expr": "lstm_pred_rps{exported_service=~\"$service\"}",
-          "legendFormat": "pred_rps ({{exported_service}})"
+          "expr": "lstm_pred_rps{service=~\"$pred_service\"}",
+          "legendFormat": "pred_rps ({{service}})",
+          "refId": "B"
         }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
     },
     {
-      "title": "CPU – Observed vs Predicted (norm)",
+      "id": 2,
+      "title": "CPU Requests (cores) – Current",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pod:cpu:usage1m{namespace=\"apps\", pod=~\"($service)-.*\"}",
-          "legendFormat": "observed_cpu_norm ({{pod}})"
-        },
-        {
-          "expr": "lstm_pred_cpu{exported_service=~\"$service\"}",
-          "legendFormat": "pred_cpu_norm ({{exported_service}})"
+          "expr": "svc:cpu_requests{job=~\"$app_service\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "cores" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
     },
     {
-      "title": "Memory – Observed vs Predicted (norm)",
+      "id": 3,
+      "title": "Memory Requests (GiB) – Current",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "pod:mem:usage{namespace=\"apps\", pod=~\"($service)-.*\"} / 1073741824",
-          "legendFormat": "observed_mem_norm ({{pod}})"
-        },
-        {
-          "expr": "lstm_pred_mem{exported_service=~\"$service\"}",
-          "legendFormat": "pred_mem_norm ({{exported_service}})"
+          "expr": "(svc:mem_requests{job=~\"$app_service\"}) / 1024 / 1024 / 1024",
+          "legendFormat": "{{job}}",
+          "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "gibibytes" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
     },
     {
-      "title": "Desired Replicas (Autoscaling Signal)",
+      "id": 4,
+      "title": "Latency P95 (ms) – Current",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "lstm_desired_replicas{exported_service=~\"$service\"}",
-          "legendFormat": "desired_replicas ({{exported_service}})"
+          "expr": "svc:latency_p95_ms_1m{job=~\"$app_service\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Replicas Available – Current",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "svc:replicas:available:1m{job=~\"$app_service\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
     }
   ]
 }

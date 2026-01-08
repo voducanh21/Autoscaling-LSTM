@@ -1,0 +1,366 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: silver-metrics-script
+  namespace: airflow
+data:
+  silver_builder.py: |
+    import os, sys, json
+    import pandas as pd
+    import s3fs
+    import pyarrow.parquet as pq
+    import numpy as np
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    BUCKET = os.getenv("S3_BUCKET", "datalake")
+    BRONZE_PREF = os.getenv("BRONZE_PREFIX", "bronze/metrics")
+    SILVER_PREF = os.getenv("SILVER_PREFIX", "silver/metrics")
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    AWS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET = os.getenv("AWS_SECRET_ACCESS_KEY")
+    TZ_NAME = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
+
+    # horizon in minutes for future prediction
+    HORIZON = int(os.getenv("HORIZON_MINUTES", "5"))
+
+    # resample frequency (bronze -> silver)
+    FREQ = os.getenv("FREQ", "1min")
+
+    # limit forward-fill to avoid "inventing" data across long gaps
+    MAX_FFILL_MIN = int(os.getenv("MAX_FFILL_MINUTES", "10"))
+
+    # process only last N days in bronze (default: 7 days)
+    LOOKBACK_DAYS = int(os.getenv("BRONZE_LOOKBACK_DAYS", "7"))
+
+    # marker file to write into bronze after run
+    MARKER_DIR = os.getenv("BRONZE_MARKER_DIR", f"{BRONZE_PREF}/_markers").strip().strip("/")
+    MARKER_NAME = os.getenv("BRONZE_MARKER_NAME", f"silver_builder_last_{LOOKBACK_DAYS}d.json").strip()
+
+    # write mode
+    # - overwrite (default): write a deterministic file name per partition, rerun will replace
+    # - append: write part-{timestamp}.parquet and keep history (training must dedupe)
+    WRITE_MODE = os.getenv("SILVER_WRITE_MODE", "overwrite").lower().strip()
+    FIXED_PART_NAME = os.getenv("SILVER_PART_NAME", "part-0.parquet").strip()
+
+    CPU_LIMIT_MAP = {
+        "api-gateway": 1.0,
+        "authentication-service": 0.5,
+        "order-service": 0.5,
+        "payment-service": 0.5,
+        "product-service": 1.0,
+    }
+    MEM_LIMIT = float(os.getenv("MEM_LIMIT_BYTES", "1073741824"))  # 1GiB default
+
+    try:
+        TZ = ZoneInfo(TZ_NAME)
+    except Exception:
+        TZ = timezone.utc
+
+    storage_opts = {
+        "key": AWS_KEY,
+        "secret": AWS_SECRET,
+        "client_kwargs": {"endpoint_url": S3_ENDPOINT},
+    }
+
+    fs = s3fs.S3FileSystem(
+        key=AWS_KEY,
+        secret=AWS_SECRET,
+        client_kwargs={"endpoint_url": S3_ENDPOINT},
+    )
+
+    # ============================================================
+    # Helpers: list/read bronze
+    # ============================================================
+
+    def list_dates():
+        prefix = f"{BUCKET}/{BRONZE_PREF}/"
+        paths = fs.glob(prefix + "date=*/service=*/")
+        dates = sorted({
+            path.split("date=")[1].split("/")[0]
+            for path in paths
+            if "date=" in path
+        })
+        return dates
+
+    def list_services_for_day(day: str):
+        prefix = f"{BUCKET}/{BRONZE_PREF}/date={day}/"
+        svc_paths = fs.glob(prefix + "service=*/")
+        svcs = sorted({
+            p.split("/service=")[1].split("/")[0]
+            for p in svc_paths
+            if "/service=" in p
+        })
+        return svcs
+
+    def read_bronze_day_service(day: str, svc: str):
+        """Read bronze for one day + one service only (reduces memory)."""
+        prefix = f"{BUCKET}/{BRONZE_PREF}/date={day}/service={svc}/"
+        files = sorted(fs.glob(prefix + "part-*.parquet"))
+        if not files:
+            return None
+
+        dfs = []
+        for f in files:
+            try:
+                with fs.open(f, "rb") as fobj:
+                    df = pq.read_table(fobj).to_pandas()
+                    dfs.append(df)
+            except Exception as e:
+                print(f"[WARN] Skip file {f}: {e}")
+
+        if not dfs:
+            return None
+        return pd.concat(dfs, ignore_index=True)
+
+    # ============================================================
+    # Schema + normalization (vectorized, no apply)
+    # ============================================================
+
+    def enforce_schema(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+
+        df["service"] = df["service"].astype(str)
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+
+        for c in ["rps_1m", "latency_p95_ms", "cpu_cores_1m", "mem_bytes"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            else:
+                df[c] = np.nan
+
+        df = df.dropna(subset=["ts", "service"])
+        df = df.sort_values("ts")
+
+        cpu_limit = df["service"].map(CPU_LIMIT_MAP).fillna(1.0).astype(float)
+        df["cpu_norm"] = (df["cpu_cores_1m"].astype(float) / cpu_limit).astype(np.float32)
+        df["mem_norm"] = (df["mem_bytes"].astype(float) / float(MEM_LIMIT)).astype(np.float32)
+
+        return df
+
+    # ============================================================
+    # Feature engineering (NO FUTURE LEAKAGE)
+    # ============================================================
+
+    def add_features_one_service(df_svc: pd.DataFrame) -> pd.DataFrame:
+        if df_svc is None or df_svc.empty:
+            return pd.DataFrame()
+
+        g = df_svc.copy()
+        g = g.drop_duplicates(subset=["ts"], keep="last")
+        g = g.sort_values("ts")
+        g = g.set_index("ts")
+
+        # enforce regular 1-minute grid
+        g = g.asfreq(FREQ)
+
+        # forward-fill raw metrics (limited), avoid bfill to prevent using future values
+        raw_cols = ["rps_1m", "latency_p95_ms", "cpu_norm", "mem_norm"]
+        for c in raw_cols:
+            g[c] = g[c].astype(float)
+            g[c] = g[c].ffill(limit=MAX_FFILL_MIN)
+
+        # rolling (past-looking, safe)
+        g["rps_roll_mean_5m"] = g["rps_1m"].rolling("5min", min_periods=1).mean()
+        g["rps_roll_mean_15m"] = g["rps_1m"].rolling("15min", min_periods=1).mean()
+
+        # lag (past-looking, safe)
+        g["rps_lag_1m"] = g["rps_1m"].shift(1)
+        g["cpu_lag_1m"] = g["cpu_norm"].shift(1)
+        g["mem_lag_1m"] = g["mem_norm"].shift(1)
+
+        # targets (future) — DO NOT FILL THESE
+        g["rps_future"] = g["rps_1m"].shift(-HORIZON)
+        g["cpu_future"] = g["cpu_norm"].shift(-HORIZON)
+        g["mem_future"] = g["mem_norm"].shift(-HORIZON)
+
+        # cleanup infinities
+        g.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows with missing required features or target
+        required = [
+            "rps_1m", "latency_p95_ms", "cpu_norm", "mem_norm",
+            "rps_roll_mean_5m", "rps_roll_mean_15m",
+            "rps_lag_1m", "cpu_lag_1m", "mem_lag_1m",
+            "rps_future", "cpu_future", "mem_future",
+        ]
+        g = g.dropna(subset=required)
+
+        # convert index to TZ for hour/dow and partitioning by local date
+        g.index = g.index.tz_convert(TZ)
+        g["hour"] = g.index.hour.astype(int)
+        g["dow"] = g.index.weekday.astype(int)
+
+        out = g.reset_index().rename(columns={"index": "ts"})
+
+        # keep dtypes compact
+        num_cols = [
+            "rps_1m","latency_p95_ms","cpu_norm","mem_norm",
+            "rps_roll_mean_5m","rps_roll_mean_15m",
+            "rps_lag_1m","cpu_lag_1m","mem_lag_1m",
+            "rps_future","cpu_future","mem_future",
+        ]
+        for c in num_cols:
+            out[c] = out[c].astype(np.float32)
+
+        return out
+
+    # ============================================================
+    # Write partitioned silver
+    # ============================================================
+
+    def write_silver_partition(df_day_svc: pd.DataFrame, day_local: str, svc: str) -> int:
+        if df_day_svc is None or df_day_svc.empty:
+            return 0
+
+        if WRITE_MODE == "append":
+            fname = f"part-{int(datetime.now(timezone.utc).timestamp())}.parquet"
+        else:
+            fname = FIXED_PART_NAME  # overwrite per partition
+
+        path = f"s3://{BUCKET}/{SILVER_PREF}/date={day_local}/service={svc}/{fname}"
+
+        # ensure uniqueness inside partition
+        df_day_svc = df_day_svc.sort_values("ts")
+        df_day_svc = df_day_svc.drop_duplicates(subset=["service", "ts"], keep="last")
+
+        df_day_svc.to_parquet(
+            path,
+            index=False,
+            engine="pyarrow",
+            storage_options=storage_opts,
+            use_dictionary=False,
+        )
+
+        rows = len(df_day_svc)
+        print(f"[OK] wrote {path} (rows={rows})")
+        return rows
+
+    # ============================================================
+    # Marker writer (into bronze)
+    # ============================================================
+
+    def write_bronze_marker(dates_all, dates_processed, rows_written_map: dict):
+        marker_path = f"s3://{BUCKET}/{MARKER_DIR}/{MARKER_NAME}"
+
+        payload = {
+            "run_utc": datetime.now(timezone.utc).isoformat(),
+            "timezone": TZ_NAME,
+            "lookback_days": LOOKBACK_DAYS,
+            "bronze_prefix": BRONZE_PREF,
+            "silver_prefix": SILVER_PREF,
+            "dates_available": {
+                "count": len(dates_all),
+                "min": dates_all[0] if dates_all else None,
+                "max": dates_all[-1] if dates_all else None,
+            },
+            "dates_processed": {
+                "count": len(dates_processed),
+                "min": dates_processed[0] if dates_processed else None,
+                "max": dates_processed[-1] if dates_processed else None,
+                "list": dates_processed,
+            },
+            "params": {
+                "horizon_minutes": HORIZON,
+                "freq": FREQ,
+                "max_ffill_minutes": MAX_FFILL_MIN,
+                "silver_write_mode": WRITE_MODE,
+                "silver_part_name": FIXED_PART_NAME,
+            },
+            "rows_written": rows_written_map,
+        }
+
+        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+        # use s3fs to write
+        with fs.open(marker_path, "wb") as f:
+            f.write(body)
+
+        print(f"[OK] wrote bronze marker {marker_path} (bytes={len(body)})")
+
+    # ============================================================
+    # Main (per day, per service, with cross-day context)
+    # ============================================================
+
+    def main():
+        dates = list_dates()
+        if not dates:
+            print("[ERROR] No bronze dates found.", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"[INFO] Found {len(dates)} dates: {dates[0]} .. {dates[-1]}")
+
+        # Only process last N days (default: 7)
+        target_dates = dates[-LOOKBACK_DAYS:] if LOOKBACK_DAYS > 0 else dates
+        print(f"[INFO] Target last {LOOKBACK_DAYS} day(s): {target_dates[0]} .. {target_dates[-1]} (count={len(target_dates)})")
+
+        # Prefer fixed service list for stability; fallback to discovered if needed
+        fixed_services = sorted(CPU_LIMIT_MAP.keys())
+
+        rows_written = {}  # {day: {svc: rows}}
+
+        for day in target_dates:
+            i = dates.index(day)  # index in full list for prev/next context
+            prev_day = dates[i-1] if i > 0 else None
+            next_day = dates[i+1] if i < len(dates) - 1 else None
+
+            print(f"[INFO] Processing day={day} (prev={prev_day}, next={next_day})")
+
+            present_svcs = set(list_services_for_day(day))
+            svcs = [s for s in fixed_services if (s in present_svcs)] or sorted(present_svcs)
+
+            if not svcs:
+                print(f"[WARN] No services found in bronze for day={day}")
+                continue
+
+            rows_written.setdefault(day, {})
+
+            for svc in svcs:
+                # read cross-day context: prev + day + next
+                dfs = []
+
+                if prev_day is not None:
+                    dprev = read_bronze_day_service(prev_day, svc)
+                    if dprev is not None and not dprev.empty:
+                        dfs.append(dprev)
+
+                dcur = read_bronze_day_service(day, svc)
+                if dcur is None or dcur.empty:
+                    continue
+                dfs.append(dcur)
+
+                if next_day is not None:
+                    dnext = read_bronze_day_service(next_day, svc)
+                    if dnext is not None and not dnext.empty:
+                        dfs.append(dnext)
+
+                df_ctx = pd.concat(dfs, ignore_index=True)
+                df_ctx = enforce_schema(df_ctx)
+
+                df_ctx = df_ctx[df_ctx["service"] == svc].copy()
+                if df_ctx.empty:
+                    continue
+
+                feat = add_features_one_service(df_ctx)
+                if feat.empty:
+                    continue
+
+                feat["date_local"] = feat["ts"].dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
+                feat_day = feat[feat["date_local"] == day].drop(columns=["date_local"])
+
+                n = write_silver_partition(feat_day, day, svc)
+                if n > 0:
+                    rows_written[day][svc] = n
+
+            print(f"[OK] Completed day={day}")
+
+        # Write marker into bronze to indicate the last-week run
+        try:
+            write_bronze_marker(dates_all=dates, dates_processed=target_dates, rows_written_map=rows_written)
+        except Exception as e:
+            print(f"[WARN] Failed to write bronze marker: {e}")
+
+        print("[INFO] Silver pipeline finished.")
+
+    if __name__ == "__main__":
+        main()
