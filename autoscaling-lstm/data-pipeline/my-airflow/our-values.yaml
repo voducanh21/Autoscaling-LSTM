@@ -2,10 +2,12 @@ mysql:
   enabled: true
 
   auth:
-    rootPassword: "12345678"
     username: airflow
-    password: "12345678"
     database: airflow
+    existingSecret: airflow-mysql-auth
+    secretKeys:
+      adminPasswordKey: mysql-root-password
+      userPasswordKey: mysql-password
 
   primary:
     persistence:

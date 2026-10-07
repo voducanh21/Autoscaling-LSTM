@@ -37,7 +37,8 @@ externalDatabase:
   type: "postgresql" # Chỉ định loại database ngoài
   host: "mlflow-pg-postgresql"
   user: mlflow
-  password: mlflowpass
+  # Supply at deploy time: --set-string externalDatabase.password="$MLFLOW_DATABASE_PASSWORD"
+  password: ""
   database: mlflow_db
   port: 5432 # Thêm port mặc định
 

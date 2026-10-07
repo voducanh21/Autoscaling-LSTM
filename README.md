@@ -42,6 +42,14 @@ This command will initialize:
 - PostgreSQL (port 5432) - creates database: `productdb`
 - MongoDB (port 27017) - databases for order and chat services
 
+The Compose files require `MYSQL_ROOT_PASSWORD`, `POSTGRES_PASSWORD`, and
+`MONGO_INITDB_ROOT_PASSWORD` in the environment; they intentionally have no
+committed defaults. The Spring services and MinIO utilities also require
+`JWT_SECRET`, `SPRING_DATA_MONGODB_URI`, `AWS_ACCESS_KEY_ID`, and
+`AWS_SECRET_ACCESS_KEY`. Store these in Replit Secrets rather than a tracked
+file. For Kubernetes-only credentials, use the `create-secret.sh` scripts
+beside the relevant manifests.
+
 ### 2. Running Backend Services
 
 Start the services in the following order:
@@ -115,11 +123,19 @@ The project supports Kubernetes deployment:
 cd backend/k8s
 
 # Deploy infrastructure (databases)
+kubectl apply -f infra/namespaces.yml
+bash infra/create-secrets.sh
 kubectl apply -f infra/
 
 # Deploy applications
 kubectl apply -f apps/
 ```
+
+The secret-creation script reads `MYSQL_ROOT_PASSWORD`, `POSTGRES_PASSWORD`,
+`MONGO_INITDB_ROOT_PASSWORD`, and `SPRING_DATA_MONGODB_URI` from the environment.
+For clusters outside Replit, provision those values in the cluster's secret manager
+and run the script from a machine with the appropriate `kubectl` context; Replit
+Secrets are not automatically injected into an external Kubernetes cluster.
 
 ### Kind (Local Kubernetes)
 

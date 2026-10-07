@@ -2,10 +2,10 @@ server:
   port: 8084
 
 jwt:
-  secret: ${JWT_SECRET:esewa}
+  secret: ${JWT_SECRET}
 app:
   jwttoken:
-    message: ${APP_JWTTOKEN_MESSAGE:esewa-is-my-secret-key}
+    message: ${APP_JWTTOKEN_MESSAGE:token-created}
 
 spring:
   application:
@@ -14,7 +14,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/userdb}
     username: ${SPRING_DATASOURCE_USERNAME:root}
-    password: ${SPRING_DATASOURCE_PASSWORD:root}
+    password: ${MYSQL_ROOT_PASSWORD}
 
   jpa:
     hibernate:
@@ -26,8 +26,8 @@ spring:
 #      client:
 #        registration:
 #          github:
-#            clientId: 156aaa94354206aa50da
-#            clientSecret: abb261ac11ba291f98d84b59f953623bf428095c
+#            clientId: ${GITHUB_CLIENT_ID}
+#            clientSecret: ${GITHUB_CLIENT_SECRET}
 
 management:
   endpoints:

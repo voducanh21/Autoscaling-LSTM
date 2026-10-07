@@ -31,7 +31,10 @@ spec:
             - name: POSTGRES_USER
               value: mlflow
             - name: POSTGRES_PASSWORD
-              value: mlflow
+              valueFrom:
+                secretKeyRef:
+                  name: mlflow-db-credentials
+                  key: MLFLOW_DATABASE_PASSWORD
             - name: POSTGRES_DB
               value: mlflow
           ports:

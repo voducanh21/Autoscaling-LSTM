@@ -16,8 +16,8 @@ RUN_TAG = os.getenv("RUN_TAG", "")  # ví dụ "20260103T124245Z"
 USE_LATEST = os.getenv("USE_LATEST", "true").lower() == "true"
 
 fs = s3fs.S3FileSystem(
-    key="H7TLSw9YlDtC88KDjzMN",
-    secret="6thNYmyTFH1HZdl1DIw4mSx8Z6Eu8p2lIg50yizL",
+    key=os.environ["AWS_ACCESS_KEY_ID"],
+    secret=os.environ["AWS_SECRET_ACCESS_KEY"],
     client_kwargs={"endpoint_url": S3_ENDPOINT},
 )
 

@@ -32,7 +32,10 @@ spec:
               memory: "1Gi"
           env:
             - name: SPRING_DATA_MONGODB_URI
-              value: mongodb://root:password@mongo.infra.svc.cluster.local:27017/orderdb?authSource=admin
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-mongodb
+                  key: SPRING_DATA_MONGODB_URI
 ---
 apiVersion: v1
 kind: Service

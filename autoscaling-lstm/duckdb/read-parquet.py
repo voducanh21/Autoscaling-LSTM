@@ -7,8 +7,8 @@ import pandas as pd
 # 1) Cấu hình MinIO (khuyên dùng ENV thay vì hardcode)
 # =========================
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "https://minio.voducanh.id.vn")
-MINIO_KEY = os.getenv("MINIO_KEY", "H7TLSw9YlDtC88KDjzMN")
-MINIO_SECRET = os.getenv("MINIO_SECRET", "6thNYmyTFH1HZdl1DIw4mSx8Z6Eu8p2lIg50yizL")
+MINIO_KEY = os.environ["AWS_ACCESS_KEY_ID"]
+MINIO_SECRET = os.environ["AWS_SECRET_ACCESS_KEY"]
 
 # Nếu MinIO dùng cert tự ký và bị lỗi SSL, thử bật dòng dưới (không khuyến nghị cho production)
 # VERIFY_TLS = os.getenv("VERIFY_TLS", "true").lower() == "true"
