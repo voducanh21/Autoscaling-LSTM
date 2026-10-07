@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${JWT_SECRET:?Set JWT_SECRET in Replit Secrets first}"
 : "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in Replit Secrets first}"
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Replit Secrets first}"
 : "${MONGO_INITDB_ROOT_PASSWORD:?Set MONGO_INITDB_ROOT_PASSWORD in Replit Secrets first}"
@@ -34,5 +35,9 @@ create_secret infra mysql-secrets \
   mysql_root_password MYSQL_ROOT_PASSWORD
 create_secret infra postgres-secrets \
   postgres_password POSTGRES_PASSWORD
+create_secret apps application-secrets \
+  JWT_SECRET JWT_SECRET \
+  MYSQL_ROOT_PASSWORD MYSQL_ROOT_PASSWORD \
+  POSTGRES_PASSWORD POSTGRES_PASSWORD
 create_secret apps order-service-mongodb \
   SPRING_DATA_MONGODB_URI SPRING_DATA_MONGODB_URI

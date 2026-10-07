@@ -1,3 +1,5 @@
+jwt:
+  secret: ${JWT_SECRET}
 spring:
   data:
     mongodb:

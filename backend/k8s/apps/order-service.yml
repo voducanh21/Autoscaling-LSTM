@@ -36,6 +36,11 @@ spec:
                 secretKeyRef:
                   name: order-service-mongodb
                   key: SPRING_DATA_MONGODB_URI
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: application-secrets
+                  key: JWT_SECRET
 ---
 apiVersion: v1
 kind: Service

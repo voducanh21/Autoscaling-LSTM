@@ -35,8 +35,16 @@ spec:
               value: jdbc:postgresql://postgres.infra.svc.cluster.local:5432/productdb
             - name: SPRING_DATASOURCE_USERNAME
               value: postgres
-            - name: SPRING_DATASOURCE_PASSWORD
-              value: root
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: application-secrets
+                  key: POSTGRES_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: application-secrets
+                  key: JWT_SECRET
 ---
 apiVersion: v1
 kind: Service

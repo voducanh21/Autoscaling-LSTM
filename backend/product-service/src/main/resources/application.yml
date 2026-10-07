@@ -1,3 +1,5 @@
+jwt:
+  secret: ${JWT_SECRET}
 spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/productdb}

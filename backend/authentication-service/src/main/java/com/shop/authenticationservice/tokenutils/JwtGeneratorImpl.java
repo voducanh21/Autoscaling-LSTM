@@ -30,7 +30,7 @@ public class JwtGeneratorImpl implements JwtGenerator {
         jwtToken = Jwts.builder().setSubject(
                 user.getUserName())
                 .setIssuedAt(new Date())
-                .signWith(SignatureAlgorithm.HS256,"esewa").compact();
+                .signWith(SignatureAlgorithm.HS256, secret).compact();
 
         Map<String, String> generatedJWTToken = new HashMap<>();
         generatedJWTToken.put("token", jwtToken);

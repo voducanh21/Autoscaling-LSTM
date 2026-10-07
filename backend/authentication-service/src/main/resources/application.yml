@@ -5,7 +5,7 @@ jwt:
   secret: ${JWT_SECRET}
 app:
   jwttoken:
-    message: ${APP_JWTTOKEN_MESSAGE:token-created}
+    message: ${APP_JWTTOKEN_MESSAGE:esewa-is-my-secret-key}
 
 spring:
   application:

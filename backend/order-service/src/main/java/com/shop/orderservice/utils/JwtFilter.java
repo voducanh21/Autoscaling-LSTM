@@ -19,6 +19,12 @@ import java.io.IOException;
  * A JWT filter class for filtering requests and responses
  */
 public class JwtFilter extends GenericFilterBean {
+    private final String secret;
+
+    public JwtFilter(String secret) {
+        this.secret = secret;
+    }
+
     @Override
     public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain)
             throws IOException, ServletException {
@@ -35,7 +41,7 @@ public class JwtFilter extends GenericFilterBean {
             }
         }
         final String token = authHeader.substring(7);
-        Claims claims = Jwts.parser().setSigningKey("esewa").parseClaimsJws(token).getBody();
+        Claims claims = Jwts.parser().setSigningKey(secret).parseClaimsJws(token).getBody();
         request.setAttribute("claims", claims);
         request.setAttribute("order", servletRequest.getParameter("id"));
         filterChain.doFilter(request, response);
