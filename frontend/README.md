@@ -1,27 +1,37 @@
-# Ecommerce
+# Frontend: Angular Storefront
 
-This project was generated with [Angular CLI](https://github.com/angular/angular-cli) version 16.0.2.
+An Angular single-page storefront for the commerce APIs. The UI includes authentication screens, a home/catalog view, cart and order pages, shared layout components, and API services/interceptors.
 
-## Development server
+## Stack
 
-Run `ng serve` for a dev server. Navigate to `http://localhost:4200/`. The application will automatically reload if you change any of the source files.
+- Angular 16 and TypeScript
+- Angular Material for UI components
+- Tailwind CSS for utility-based styling
+- Angular Router and RxJS for navigation and asynchronous API calls
 
-## Code scaffolding
+## Run locally
 
-Run `ng generate component component-name` to generate a new component. You can also use `ng generate directive|pipe|service|class|guard|interface|enum|module`.
+Start the backend API Gateway on port `8888`, then run:
 
-## Build
+```bash
+cd frontend
+npm ci
+npm start
+```
 
-Run `ng build` to build the project. The build artifacts will be stored in the `dist/` directory.
+Open `http://localhost:4200`. The development server forwards requests under `/api` to `http://localhost:8888` using `proxy.conf.json`.
 
-## Running unit tests
+## Production build
 
-Run `ng test` to execute the unit tests via [Karma](https://karma-runner.github.io).
+```bash
+npm run build
+```
 
-## Running end-to-end tests
+The Angular CLI writes the static build output to `dist/`. The included `Dockerfile` and `nginx.conf` provide the container-serving path.
 
-Run `ng e2e` to execute the end-to-end tests via a platform of your choice. To use this command, you need to first add a package that implements end-to-end testing capabilities.
+## Source layout
 
-## Further help
-
-To get more help on the Angular CLI use `ng help` or go check out the [Angular CLI Overview and Command Reference](https://angular.io/cli) page.
+- `src/app/authentication/` — login, signup, and guards
+- `src/app/pages/` — home, cart, and order views
+- `src/app/components/` — shared header, footer, and fallback page
+- `src/app/services/` — API integration and interceptors

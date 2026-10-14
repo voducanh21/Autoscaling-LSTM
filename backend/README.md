@@ -1,43 +1,59 @@
-## 1. Set up database
-## Use MySQL to create database for authentication-service, payment-service
-CREATE DATABASE userdb;
-CREATE DATABASE paymentdb;
-## Use PostgreSQL to create database for product-service
-CREATE DATABASE productdb; 
-## Use MongoDB to create database for order-service
+# Backend: Commerce Microservices
 
+The backend separates the storefront API into independently runnable Spring services. A Spring Cloud Gateway provides the client entry point, while each domain service owns its API and database connection.
 
-## 2. Run all service
-## 2.1. Run registry-discovery-server
-cd .\registry-discovery-server
-.\gradlew.bat build 
-.\gradlew bootRun
-## if you want to skip test
-.\gradlew.bat build - test
+## Service map
 
-## 2.2. Run api-gateway
-cd .\api-gateway
-.\mvnw clean install
-.\mvnw spring-boot:run
+| Service | Port | Responsibility | Store |
+| --- | ---: | --- | --- |
+| API Gateway | 8888 | Routes client `/api` traffic | — |
+| Authentication | 8084 | Registration, login, and JWT issuance | MySQL (`userdb`) |
+| Product | 8081 | Product catalog API | PostgreSQL (`productdb`) |
+| Order | 8083 | Order API | MongoDB |
+| Payment | 8082 | Payment API | MySQL (`paymentdb`) |
 
-## 2.3. Run authentication-service
-cd .\authentication-service
-.\mvnw clean install
-.\mvnw spring-boot:run
+## Run locally
 
-## 2.4. Run product-service
-cd .\product-service
-.\mvnw clean install
-.\mvnw spring-boot:run
+Requirements: Java 17+, Docker Compose, and the environment values below. The Maven wrapper is included in every module.
 
-## 2.5. Run order-service
-cd .\order-service
-.\mvnw clean install
-.\mvnw spring-boot:run
+1. Supply `MYSQL_ROOT_PASSWORD`, `POSTGRES_PASSWORD`, `MONGO_INITDB_ROOT_PASSWORD`, `SPRING_DATA_MONGODB_URI`, and a shared Base64 `JWT_SECRET` of at least 256 bits through Replit Secrets or your local process environment.
+2. Start the databases:
 
-## 2.6. Run payment-service
-cd .\payment-service
-.\mvnw clean install
-.\mvnw spring-boot:run
+   ```bash
+   docker compose -f backend/docker-compose.yml up -d mysql postgres mongodb
+   ```
 
-## 2.7. (removed) chat-service has been removed from this repository
+3. Run each service in a separate terminal:
+
+   ```bash
+   cd backend/api-gateway && ./mvnw spring-boot:run
+   cd backend/authentication-service && ./mvnw spring-boot:run
+   cd backend/product-service && ./mvnw spring-boot:run
+   cd backend/order-service && ./mvnw spring-boot:run
+   cd backend/payment-service && ./mvnw spring-boot:run
+   ```
+
+The Angular app proxies `/api` to `http://localhost:8888`; see [`../frontend/README.md`](../frontend/README.md).
+
+## Kubernetes
+
+From the repository root, with the required values available in the shell and a valid cluster context:
+
+```bash
+kubectl apply -f backend/k8s/infra/namespaces.yml
+bash backend/k8s/infra/create-secrets.sh
+kubectl apply -f backend/k8s/infra/
+kubectl apply -f backend/k8s/apps/
+```
+
+Replit Secrets are not automatically delivered to an external cluster. The secret-creation script uses the current environment to create Kubernetes Secrets; apply the namespace manifests first.
+
+## Local observability
+
+`backend/docker-compose.yml` also defines Prometheus, Grafana, Loki, and Tempo. Start the full local dependency and observability stack with:
+
+```bash
+docker compose -f backend/docker-compose.yml up -d
+```
+
+The Compose file intentionally requires database passwords; there are no committed defaults.

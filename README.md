@@ -1,344 +1,115 @@
-# E-commerce Microservices Application
+# Commerce Platform
 
-A comprehensive e-commerce application built with microservices architecture using Angular frontend and Spring Boot backend services.
+**A cloud-native e-commerce portfolio project combining Spring Boot microservices, an Angular storefront, Kubernetes autoscaling, and an LSTM forecasting pipeline.**
 
-## 🏗️ System Architecture
+The repository demonstrates how an independently deployable commerce backend can be paired with both reactive CPU-based scaling and a predictive scaling path. It includes local development dependencies, Kubernetes manifests, load-test assets, and observability configuration.
 
-### Backend (Microservices)
-- **API Gateway**: Single entry point for all client requests with routing and security
-- **Authentication Service**: Handles user authentication, registration, and authorization
-- **Product Service**: Manages products, categories, and inventory
-- **Order Service**: Processes orders and manages shopping cart functionality
-- **Payment Service**: Handles payment processing and transactions
-<!-- Chat service removed from this repository -->
+## Architecture
 
-### Frontend
-- **Angular**: Single Page Application with Material Design components
-- **Tailwind CSS**: Utility-first CSS framework for responsive styling
+```mermaid
+flowchart LR
+    Customer[Customer] --> Web[Angular 16 storefront]
+    Web --> Gateway[Spring Cloud Gateway :8888]
+    Gateway --> Auth[Authentication :8084]
+    Gateway --> Product[Product :8081]
+    Gateway --> Order[Order :8083]
+    Gateway --> Payment[Payment :8082]
+    Auth --> MySQL[(MySQL)]
+    Payment --> MySQL
+    Product --> PostgreSQL[(PostgreSQL)]
+    Order --> MongoDB[(MongoDB)]
 
-### Databases
-- **MySQL**: Used by Authentication Service and Payment Service
-- **PostgreSQL**: Used by Product Service for product data
-- **MongoDB**: Used by Order Service
-
-## 🚀 Getting Started
-
-### System Requirements
-- Node.js (v16+)
-- Java 17+
-- Docker & Docker Compose
-- Angular CLI
-- Maven
-
-### 1. Database Setup with Docker
-
-```bash
-cd backend
-docker-compose up -d
+    subgraph Predictive scaling
+        Airflow[Airflow data and training workflows] --> MLflow[MLflow tracking]
+        MinIO[(MinIO object storage)] --> DuckDB[DuckDB analysis]
+        MLflow --> Inference[FastAPI model serving]
+        Inference --> Exporter[Predictor exporter]
+        Exporter --> Prometheus[Prometheus metric]
+        Prometheus --> KEDA[KEDA ScaledObjects]
+        KEDA --> Gateway
+        KEDA --> Auth
+        KEDA --> Product
+        KEDA --> Order
+        KEDA --> Payment
+    end
 ```
 
-This command will initialize:
-- MySQL (port 3306) - creates databases: `userdb`, `paymentdb`
-- PostgreSQL (port 5432) - creates database: `productdb`
-- MongoDB (port 27017) - databases for order and chat services
+## What this project demonstrates
 
-The Compose files require `MYSQL_ROOT_PASSWORD`, `POSTGRES_PASSWORD`, and
-`MONGO_INITDB_ROOT_PASSWORD` in the environment; they intentionally have no
-committed defaults. The Spring services and MinIO utilities also require
-`JWT_SECRET`, `SPRING_DATA_MONGODB_URI`, `AWS_ACCESS_KEY_ID`, and
-`AWS_SECRET_ACCESS_KEY`. Store these in Replit Secrets rather than a tracked
-file. `JWT_SECRET` must be the same Base64-encoded key (at least 256 bits)
-for the authentication, order, payment, and product services. For
-Kubernetes-only credentials, use the `create-secret.sh` scripts
-beside the relevant manifests.
+- **Service boundaries:** an API gateway fronts authentication, product, order, and payment services.
+- **Polyglot persistence:** MySQL, PostgreSQL, and MongoDB are assigned to services with different data needs.
+- **Two scaling strategies:** Kubernetes HPA policies use CPU utilization; KEDA policies consume Prometheus metrics for forecast-driven replica counts.
+- **ML operations:** Airflow workflows and Kubernetes jobs prepare datasets, train LSTM/CNN-LSTM/TCN models, and support model tracking and drift analysis.
+- **Observability and testing:** Prometheus, Grafana, Loki, Tempo, and Locust assets support metrics, dashboards, logs, traces, and repeatable load tests.
 
-### 2. Running Backend Services
+## Technology
 
-Start the services in the following order:
+| Area | Technologies |
+| --- | --- |
+| Web | Angular 16, Angular Material, Tailwind CSS |
+| Services | Java, Spring Boot, Spring Cloud Gateway, JWT |
+| Data | MySQL, PostgreSQL, MongoDB, DuckDB, MinIO |
+| ML pipeline | Airflow, TensorFlow/Keras, MLflow, FastAPI |
+| Platform | Docker Compose, Kubernetes, Helm, HPA, KEDA |
+| Observability | Prometheus, Grafana, Loki, Tempo |
 
-#### API Gateway
+## Quick start
+
+### 1. Configure runtime values
+
+Provide secrets through Replit Secrets or your local process environment. Do not commit secret values.
+
+- Core services: `JWT_SECRET`, `MYSQL_ROOT_PASSWORD`, `POSTGRES_PASSWORD`, `MONGO_INITDB_ROOT_PASSWORD`, and `SPRING_DATA_MONGODB_URI`.
+- Predictive pipeline: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for the configured MinIO/S3 endpoint.
+- `JWT_SECRET` must be the same Base64-encoded key of at least 256 bits for authentication, order, payment, and product services.
+
+### 2. Start local databases
+
+From the repository root:
+
+```bash
+docker compose -f backend/docker-compose.yml up -d mysql postgres mongodb
+```
+
+### 3. Run the backend
+
+Run each service in its own terminal. For example:
+
 ```bash
 cd backend/api-gateway
-./mvnw clean install
 ./mvnw spring-boot:run
 ```
 
-#### Authentication Service
-```bash
-cd backend/authentication-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
+The gateway listens on port `8888`. Service ports and database dependencies are listed in [`backend/README.md`](backend/README.md).
 
-#### Product Service
-```bash
-cd backend/product-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
-
-#### Order Service
-```bash
-cd backend/order-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
-
-#### Payment Service
-```bash
-cd backend/payment-service
-./mvnw clean install
-./mvnw spring-boot:run
-```
-
-#### Chat Service
-This project no longer includes a chat service.
-
-### 3. Running Frontend
+### 4. Run the storefront
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm start
 ```
 
-The application will be available at: `http://localhost:4200`
+Open `http://localhost:4200`. The Angular development proxy forwards `/api` requests to the gateway at `http://localhost:8888`.
 
-## 🐳 Docker Deployment
+## Kubernetes and scaling
 
-### Running the entire system with Docker
+- [`backend/k8s/`](backend/k8s/) contains application and infrastructure manifests. Create the namespaces and provision secrets before applying workloads; the scripts require a configured `kubectl` context.
+- [`HPA/`](HPA/) contains CPU-based policies for the five services.
+- [`autoscaling-lstm/`](autoscaling-lstm/) contains the forecasting, predictor-exporter, and KEDA components.
+- [`monitoring/`](monitoring/) contains Prometheus Helm value overrides; local observability containers are defined in `backend/docker-compose.yml`.
 
-```bash
-# Start databases
-cd backend
-docker-compose up -d
+Use either the HPA policy or the KEDA `ScaledObject` for a given Deployment at a time. Both controllers change replica counts and should not compete for the same workload.
 
-# Build and run all services
-docker-compose -f docker-compose.yml -f docker-compose.services.yml up --build
+## Repository map
+
+```text
+.
+├── autoscaling-lstm/   # Airflow, model pipeline/serving, MinIO, Locust, KEDA
+├── backend/            # Gateway, four Spring services, databases, Kubernetes
+├── frontend/           # Angular storefront
+├── HPA/                # CPU-based Kubernetes autoscalers
+└── monitoring/         # Prometheus Helm overrides
 ```
 
-## ☸️ Kubernetes Deployment
-
-The project supports Kubernetes deployment:
-
-```bash
-cd backend/k8s
-
-# Deploy infrastructure (databases)
-kubectl apply -f infra/namespaces.yml
-bash infra/create-secrets.sh
-kubectl apply -f infra/
-
-# Deploy applications
-kubectl apply -f apps/
-```
-
-The secret-creation script reads `JWT_SECRET`, `MYSQL_ROOT_PASSWORD`,
-`POSTGRES_PASSWORD`, `MONGO_INITDB_ROOT_PASSWORD`, and
-`SPRING_DATA_MONGODB_URI` from the environment.
-For clusters outside Replit, provision those values in the cluster's secret manager
-and run the script from a machine with the appropriate `kubectl` context; Replit
-Secrets are not automatically injected into an external Kubernetes cluster.
-
-### Kind (Local Kubernetes)
-
-```bash
-# Create local cluster
-kind create cluster --config=k8s/kind/kind-config.yml
-
-# Deploy
-kubectl apply -f k8s/infra/
-kubectl apply -f k8s/apps/
-```
-
-## 📱 Key Features
-
-### Frontend Features
-- 🛒 Shopping cart and order management
-- 👤 User authentication and registration
-- 🔍 Product search and filtering
-- 💳 Online payment processing
-- 💬 Customer support chat
-- 📱 Responsive design with mobile support
-
-### Backend Features
-- 🔐 JWT Authentication & Authorization
-- 🛡️ API Gateway with routing and security
-- 📊 Microservices architecture with service discovery
-- 🗄️ Multi-database support (MySQL, PostgreSQL, MongoDB)
-- 🔄 RESTful APIs with OpenAPI documentation
-- 📝 Comprehensive logging and monitoring
-
-## 🛠️ Development
-
-### Development Prerequisites
-
-```bash
-# Install Angular CLI
-npm install -g @angular/cli
-
-# Install Maven (or use the Maven wrapper included)
-# Download from: https://maven.apache.org/
-```
-
-### Running in Development Mode
-
-```bash
-# Backend - run each service separately
-cd backend/api-gateway && ./mvnw spring-boot:run
-cd backend/authentication-service && ./mvnw spring-boot:run
-# ... continue with other services
-
-# Frontend - with hot reload
-cd frontend
-ng serve --proxy-config proxy.conf.json
-```
-
-## 📋 API Documentation
-
-After running the services, API documentation is available at:
-
-- API Gateway: `http://localhost:8080/swagger-ui.html`
-- Authentication Service: `http://localhost:8081/swagger-ui.html`
-- Product Service: `http://localhost:8082/swagger-ui.html`
-- Order Service: `http://localhost:8083/swagger-ui.html`
-- Payment Service: `http://localhost:8084/swagger-ui.html`
-<!-- Chat Service API documentation removed -->
-
-## � CI/CD Pipeline
-
-This project includes a complete CI/CD pipeline using Jenkins:
-
-### Jenkins Pipeline Features
-- ✅ Automated builds for all microservices
-- ✅ SonarQube code quality analysis
-- ✅ Trivy security scanning for Docker images
-- ✅ Automatic Docker image builds and pushes
-- ✅ Kubernetes manifest updates
-- ✅ GitOps integration with ArgoCD
-
-### Quick Start CI/CD
-
-#### 1. Start Development Environment
-```bash
-# Start databases and monitoring stack
-cd backend
-docker-compose up -d
-
-# Access Monitoring
-# Grafana:    http://localhost:3000
-# Prometheus: http://localhost:9090
-```
-
-#### 2. Jenkins Setup
-```groovy
-// Configure Jenkins Credentials
-- dockerhub-credentials (Username/Password)
-- github-token (Secret text)
-- sonar-token (Secret text)
-
-// Create Pipeline Job
-Pipeline from SCM → backend/Jenkinsfile
-```
-
-#### 3. Trigger Build
-```bash
-git commit -m "feat: new feature"
-git push  # Automatically triggers Jenkins build
-
-# Or skip CI
-git commit -m "docs: update [skip-ci]"
-git push
-```
-
-### Monitoring Stack
-- **Prometheus**: Metrics collection
-- **Grafana**: Visualization dashboards
-- **Loki**: Log aggregation
-- **Tempo**: Distributed tracing
-
-### Kubernetes Deployment with ArgoCD
-```bash
-# Deploy infrastructure and apps
-kubectl apply -f backend/k8s/infra/
-kubectl apply -f backend/k8s/apps/
-
-# Setup ArgoCD for GitOps
-kubectl apply -f backend/k8s/infra/argocd-app.yaml
-```
-
-## �🗂️ Project Structure
-
-```
-E-commerce_Web/
-├── backend/
-│   ├── api-gateway/          # API Gateway service
-│   ├── authentication-service/  # User authentication
-│   ├── product-service/      # Product management
-│   ├── order-service/        # Order processing
-│   ├── payment-service/      # Payment processing
-│   ├── docker/              # Database initialization & monitoring configs
-│   ├── k8s/                 # Kubernetes deployment files
-│   │   ├── apps/            # Application deployments
-│   │   └── infra/           # Infrastructure (DBs, monitoring, ArgoCD)
-│   ├── docker-compose.yml   # Development environment
-│   └── Jenkinsfile          # CI/CD Pipeline
-├── frontend/                 # Angular application
-│   ├── src/app/
-│   │   ├── authentication/   # Auth components
-│   │   ├── components/       # Reusable components
-│   │   ├── pages/           # Page components
-│   │   └── services/        # Angular services
-│   └── ...
-├── scripts/                  # Automation scripts
-│   ├── deploy-k8s.sh        # Deploy to Kubernetes
-│   ├── cleanup-k8s.sh       # Cleanup resources
-│   ├── start-dev.sh         # Start development
-│   └── build-images.sh      # Build Docker images
-├── docker-compose.full.yml   # Full stack deployment
-├── Makefile                  # Task automation
-├── .env.example             # Environment variables template
-└── README.md               # This file
-```
-
-## 🛠️ Useful Commands
-
-### Make Commands (Task Automation)
-```bash
-make help              # Show all available commands
-make dev-up            # Start development environment
-make dev-down          # Stop development environment
-make build-all         # Build all services
-make deploy-k8s        # Deploy to Kubernetes
-make k8s-status        # Check Kubernetes status
-make cleanup-k8s       # Cleanup Kubernetes resources
-```
-
-### Manual Commands
-```bash
-# Build single service
-cd backend/api-gateway
-mvn clean package -DskipTests
-docker build -t username/api-gateway:tag .
-
-# Deploy to Kubernetes
-bash scripts/deploy-k8s.sh
-
-# Cleanup
-bash scripts/cleanup-k8s.sh
-```
-
-## 🤝 Contributing
-
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-*Last updated: August 14, 2025*
+Each module README provides its own purpose and shortest setup path.
